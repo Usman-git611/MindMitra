@@ -1,6 +1,6 @@
 {
-  "name": "MindCare NER",
-  "short_name": "MindCare",
+  "name": "MindMitra",
+  "short_name": "MindMitra",
   "description": "Gentle cognitive engagement, memory assistance, and daily support.",
   "start_url": "/",
   "display": "standalone",

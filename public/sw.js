@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mindcare-ner-v1';
+const CACHE_NAME = 'mindmitra-v2';
 const APP_SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {

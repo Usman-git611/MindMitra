@@ -1,17 +1,22 @@
 'use client';
+/* eslint-disable react-hooks/set-state-in-effect, @next/next/no-img-element -- Client hydration restores local-first data; private family photos may be data URLs or authenticated object URLs. */
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { CATEGORY_INSTRUCTIONS, CATEGORIES, createBalancedSession, difficultyFor, GAME_LIBRARY } from '../lib/games';
-import { clearLocalData, demoData, emptyData, loadLocalData, saveLocalData } from '../lib/storage';
-import type { AppData, Category, FamilyMember, GameDefinition, GameResult, Language, Reminder, RoutineItem, SessionSummary } from '../lib/types';
+import { FormEvent, useEffect, useRef, useState } from 'react';
+import { CATEGORY_INSTRUCTIONS, CATEGORIES, createBalancedSession, difficultyFor, GAME_LIBRARY, getPlayableGame } from '../lib/games';
+import { createFamilyGame, FAMILY_GAME_META } from '../lib/family-games';
+import { detectMitraIntent, LANGUAGE_LOCALES, LANGUAGE_OPTIONS, mitraReply } from '../lib/mitra';
+import { clearLocalData, demoData, emptyData, loadLocalData, normalizeData, saveLocalData } from '../lib/storage';
+import type { AppData, Category, FamilyGameProgress, FamilyGameType, FamilyMember, GameDefinition, GameProgress, GameResult, Language, PlayableGame, Reminder, RoutineItem, SessionSummary } from '../lib/types';
 
-type Screen = 'welcome' | 'onboarding' | 'greeting' | 'home' | 'games' | 'session' | 'game' | 'family' | 'medicines' | 'hydration' | 'routine' | 'appointments' | 'progress' | 'assistant' | 'settings' | 'caregiver' | 'summary';
+type Screen = 'welcome' | 'onboarding' | 'greeting' | 'home' | 'games' | 'game-detail' | 'session' | 'game' | 'family' | 'medicines' | 'hydration' | 'routine' | 'appointments' | 'progress' | 'assistant' | 'settings' | 'caregiver' | 'summary';
 type AuthUser = { userId: string; displayName: string; email: string; fullName: string | null };
 type ActiveSession = { id: string; minutes: number; games: GameDefinition[]; index: number; startedAt: string; resultIds: string[] };
 
 const uid = (prefix = 'id') => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const today = () => new Date().toISOString().slice(0, 10);
 const relationshipOptions = ['Son', 'Daughter', 'Spouse', 'Brother', 'Sister', 'Caregiver', 'Friend', 'Other'];
+const newGameProgress = (gameId: number): GameProgress => ({ gameId, currentLevel: 1, unlockedLevel: 1, completedLevels: [], attempts: 0, replayCount: 0, updatedAt: new Date().toISOString() });
+const newFamilyProgress = (type: FamilyGameType): FamilyGameProgress => ({ type, currentLevel: 1, unlockedLevel: 1, completedLevels: [], attempts: 0, replayCount: 0, updatedAt: new Date().toISOString() });
 
 const COPY = {
   en: { home: 'Home', games: 'Games', family: 'Family', progress: 'Progress', settings: 'Settings', greeting: 'Good morning', today: 'Today', activities: 'activities', reminder: 'reminder', back: 'Back', save: 'Save', cancel: 'Cancel', start: 'Start', done: 'Done', next: 'Next', allGames: 'All games', recommended: 'Recommended for you', online: 'Online · saved', offline: 'Offline · saved here', syncing: 'Saving…', synced: 'Everything saved', assistant: 'Talk to Mitra', sos: 'SOS' },
@@ -19,7 +24,7 @@ const COPY = {
   as: { home: 'মূল পৃষ্ঠা', games: 'খেল', family: 'পৰিয়াল', progress: 'অগ্ৰগতি', settings: 'ছেটিংছ', greeting: 'সুপ্ৰভাত', today: 'আজি', activities: 'কাম', reminder: 'সোঁৱৰাই দিয়া', back: 'পিছলৈ', save: 'সংৰক্ষণ', cancel: 'বাতিল', start: 'আৰম্ভ', done: 'সম্পূৰ্ণ', next: 'পৰৱৰ্তী', allGames: 'সকলো খেল', recommended: 'আপোনাৰ বাবে', online: 'অনলাইন · সংৰক্ষিত', offline: 'অফলাইন · ইয়াতে সংৰক্ষিত', syncing: 'সংৰক্ষণ হৈ আছে…', synced: 'সকলো সংৰক্ষিত', assistant: 'মিত্ৰাৰ সৈতে কথা পাতক', sos: 'SOS' },
 };
 
-export default function MindCareApp() {
+export default function MindMitraApp() {
   const [data, setData] = useState<AppData>(emptyData);
   const [ready, setReady] = useState(false);
   const [screen, setScreen] = useState<Screen>('welcome');
@@ -28,23 +33,24 @@ export default function MindCareApp() {
   const [syncStatus, setSyncStatus] = useState<'local' | 'syncing' | 'synced'>('local');
   const [toast, setToast] = useState('');
   const [showSos, setShowSos] = useState(false);
-  const [selectedGame, setSelectedGame] = useState<GameDefinition | null>(null);
+  const [selectedGame, setSelectedGame] = useState<PlayableGame | null>(null);
+  const [focusedGame, setFocusedGame] = useState<GameDefinition | null>(null);
   const [selectedAnswer, setSelectedAnswer] = useState('');
   const [answerSaved, setAnswerSaved] = useState(false);
-  const [gameStartedAt, setGameStartedAt] = useState(Date.now());
+  const [gameStartedAt, setGameStartedAt] = useState(0);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [lastSummary, setLastSummary] = useState<SessionSummary | null>(null);
   const [gameCategory, setGameCategory] = useState<'All' | Category>('All');
   const [gameSearch, setGameSearch] = useState('');
   const [assistantInput, setAssistantInput] = useState('');
-  const [assistantReply, setAssistantReply] = useState('Hello! I’m Mitra. I can start games, manage reminders, show your routine, open family, or call your emergency contact.');
+  const [assistantReply, setAssistantReply] = useState('Hello! I’m Mitra. I’m here with you. What would you like to do?');
   const [familyQuiz, setFamilyQuiz] = useState<FamilyMember | null>(null);
   const [customMinutes, setCustomMinutes] = useState(10);
   const [notificationMessage, setNotificationMessage] = useState('');
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const language: Language = data.profile?.language ?? 'en';
-  const t = COPY[language];
+  const t = COPY[language as keyof typeof COPY] ?? COPY.en;
 
   const notify = (message: string) => {
     setToast(message);
@@ -77,7 +83,7 @@ export default function MindCareApp() {
         if (!response.ok) return;
         const remote = await response.json() as { data: AppData | null; updatedAt?: string };
         if (remote.data && (!local.profile || (remote.updatedAt ?? '') > (local.updatedAt ?? ''))) {
-          setData(remote.data);
+          setData(normalizeData(remote.data));
           setScreen(remote.data.profile?.role === 'caregiver' ? 'caregiver' : 'home');
         }
       } catch { /* local data remains authoritative while offline */ }
@@ -111,7 +117,7 @@ export default function MindCareApp() {
       const due = data.reminders.find((item) => item.status === 'pending' && item.time === time && (!item.date || item.date === today()));
       if (!due) return;
       setNotificationMessage(due.title);
-      if ('Notification' in window && Notification.permission === 'granted') new Notification('MindCare reminder', { body: due.title, icon: '/icon-192.png' });
+      if ('Notification' in window && Notification.permission === 'granted') new Notification('MindMitra reminder', { body: due.title, icon: '/icon-192.png' });
     };
     checkReminders();
     const timer = window.setInterval(checkReminders, 30000);
@@ -159,7 +165,7 @@ export default function MindCareApp() {
     if (!data.profile?.voice || !('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = language === 'hi' ? 'hi-IN' : language === 'as' ? 'as-IN' : 'en-IN';
+    utterance.lang = LANGUAGE_LOCALES[language];
     window.speechSynthesis.speak(utterance);
   };
 
@@ -168,19 +174,42 @@ export default function MindCareApp() {
     const Recognition = browser.SpeechRecognition ?? browser.webkitSpeechRecognition;
     if (!Recognition) { notify('Voice input isn’t available. You can type instead.'); return; }
     const recognition = new Recognition();
-    recognition.lang = language === 'hi' ? 'hi-IN' : language === 'as' ? 'as-IN' : 'en-IN';
+    recognition.lang = LANGUAGE_LOCALES[language];
     recognition.interimResults = false;
     recognition.onresult = (event) => onResult(event.results[0][0].transcript);
     recognition.onerror = () => notify('I couldn’t hear that. Please try again or type instead.');
     recognition.start();
   };
 
-  const launchGame = (game: GameDefinition) => {
+  const gameProgressFor = (gameId: number) => data.gameProgress[String(gameId)] ?? newGameProgress(gameId);
+  const familyProgressFor = (type: FamilyGameType) => data.familyGameProgress[type] ?? newFamilyProgress(type);
+
+  const openGame = (game: GameDefinition) => {
+    setFocusedGame(game);
     setFamilyQuiz(null);
-    setSelectedGame(game);
-    setSelectedAnswer('');
+    go('game-detail');
+  };
+
+  const launchGame = (game: GameDefinition, requestedLevel?: number, replay = false, freshAttempt = false) => {
+    const progress = gameProgressFor(game.id);
+    const level = requestedLevel ?? progress.inProgress?.level ?? progress.currentLevel;
+    const generated = getPlayableGame(game, level, replay);
+    const savedState = !freshAttempt && progress.inProgress?.level === level ? progress.inProgress.state : undefined;
+    const playable = savedState ? { ...generated, ...savedState } : generated;
+    const restoredAnswer = progress.inProgress?.level === level ? progress.inProgress.selectedAnswer ?? '' : '';
+    setFocusedGame(game);
+    setFamilyQuiz(null);
+    setSelectedGame(playable);
+    setSelectedAnswer(restoredAnswer);
     setAnswerSaved(false);
     setGameStartedAt(Date.now());
+    updateData((current) => ({
+      ...current,
+      gameProgress: {
+        ...current.gameProgress,
+        [String(game.id)]: { ...(current.gameProgress[String(game.id)] ?? newGameProgress(game.id)), currentLevel: level, inProgress: { level, selectedAnswer: restoredAnswer, startedAt: new Date().toISOString(), state: { prompt: playable.prompt, options: playable.options, answer: playable.answer } }, updatedAt: new Date().toISOString() },
+      },
+    }));
     go('game');
   };
 
@@ -188,11 +217,26 @@ export default function MindCareApp() {
     const games = createBalancedSession(minutes);
     const session = { id: uid('session'), minutes, games, index: 0, startedAt: new Date().toISOString(), resultIds: [] };
     setActiveSession(session);
-    setSelectedGame(games[0]);
-    setSelectedAnswer('');
-    setAnswerSaved(false);
-    setGameStartedAt(Date.now());
-    go('game');
+    const progress = gameProgressFor(games[0].id);
+    launchGame(games[0], progress.currentLevel);
+  };
+
+  const selectAnswer = (answer: string) => {
+    if (!selectedGame) return;
+    setSelectedAnswer(answer);
+    updateData((current) => selectedGame.familyType ? ({
+      ...current,
+      familyGameProgress: {
+        ...current.familyGameProgress,
+        [selectedGame.familyType]: { ...(current.familyGameProgress[selectedGame.familyType] ?? newFamilyProgress(selectedGame.familyType)), inProgress: { ...(current.familyGameProgress[selectedGame.familyType]?.inProgress ?? { level: selectedGame.level, startedAt: new Date(gameStartedAt).toISOString() }), level: selectedGame.level, selectedAnswer: answer }, updatedAt: new Date().toISOString() },
+      },
+    }) : ({
+      ...current,
+      gameProgress: {
+        ...current.gameProgress,
+        [String(selectedGame.id)]: { ...(current.gameProgress[String(selectedGame.id)] ?? newGameProgress(selectedGame.id)), inProgress: { ...(current.gameProgress[String(selectedGame.id)]?.inProgress ?? { level: selectedGame.level, startedAt: new Date(gameStartedAt).toISOString() }), level: selectedGame.level, selectedAnswer: answer }, updatedAt: new Date().toISOString() },
+      },
+    }));
   };
 
   const saveGameAnswer = () => {
@@ -203,24 +247,45 @@ export default function MindCareApp() {
       id: uid('result'), gameId: selectedGame.id, game: selectedGame.name, category: selectedGame.category, difficulty,
       score: correct ? (difficulty === 'Hard' ? 120 : difficulty === 'Medium' ? 110 : 100) : 25,
       accuracy: correct ? 100 : 0, responseTime: Math.max(1, Math.round((Date.now() - gameStartedAt) / 1000)), mistakes: correct ? 0 : 1,
-      date: new Date().toISOString(), sessionId: activeSession?.id,
+      date: new Date().toISOString(), sessionId: activeSession?.id, level: selectedGame.level, replay: selectedGame.replay,
     };
-    updateData((current) => ({ ...current, results: [...current.results, result] }));
+    updateData((current) => {
+      if (selectedGame.familyType) {
+        const old = current.familyGameProgress[selectedGame.familyType] ?? newFamilyProgress(selectedGame.familyType);
+        const completed = correct ? Array.from(new Set([...old.completedLevels, selectedGame.level])).sort((a, b) => a - b) : old.completedLevels;
+        return {
+          ...current,
+          results: [...current.results, result],
+          familyGameProgress: {
+            ...current.familyGameProgress,
+            [selectedGame.familyType]: { ...old, attempts: old.attempts + 1, completedLevels: completed, unlockedLevel: correct ? Math.min(10, Math.max(old.unlockedLevel, selectedGame.level + 1)) : old.unlockedLevel, currentLevel: correct ? Math.min(10, selectedGame.level + 1) : selectedGame.level, inProgress: correct ? undefined : old.inProgress, updatedAt: new Date().toISOString() },
+          },
+        };
+      }
+      const old = current.gameProgress[String(selectedGame.id)] ?? newGameProgress(selectedGame.id);
+      const completed = correct ? Array.from(new Set([...old.completedLevels, selectedGame.level])).sort((a, b) => a - b) : old.completedLevels;
+      return {
+        ...current,
+        results: [...current.results, result],
+        gameProgress: {
+          ...current.gameProgress,
+          [String(selectedGame.id)]: { ...old, attempts: old.attempts + 1, completedLevels: completed, unlockedLevel: correct ? Math.min(10, Math.max(old.unlockedLevel, selectedGame.level + 1)) : old.unlockedLevel, currentLevel: correct ? Math.min(10, selectedGame.level + 1) : selectedGame.level, inProgress: correct ? undefined : old.inProgress, updatedAt: new Date().toISOString() },
+        },
+      };
+    });
     if (activeSession) setActiveSession({ ...activeSession, resultIds: [...activeSession.resultIds, result.id] });
     setAnswerSaved(true);
     if (data.profile?.sound) speak(correct ? 'Well done!' : `The answer is ${selectedGame.answer}. You are doing well by practicing.`);
   };
 
   const continueAfterGame = () => {
-    if (!activeSession) { go('games'); return; }
+    if (!activeSession) { go(selectedGame?.familyType ? 'family' : 'game-detail'); return; }
     const nextIndex = activeSession.index + 1;
     if (nextIndex < activeSession.games.length) {
       const nextSession = { ...activeSession, index: nextIndex };
       setActiveSession(nextSession);
-      setSelectedGame(nextSession.games[nextIndex]);
-      setSelectedAnswer('');
-      setAnswerSaved(false);
-      setGameStartedAt(Date.now());
+      const nextGame = nextSession.games[nextIndex];
+      launchGame(nextGame, gameProgressFor(nextGame.id).currentLevel);
       return;
     }
     const sessionResults = data.results.filter((result) => result.sessionId === activeSession.id);
@@ -232,13 +297,41 @@ export default function MindCareApp() {
     go('summary');
   };
 
-  const startFamilyGame = () => {
+  const startFamilyGame = (type: FamilyGameType = 'who', requestedLevel?: number, replay = false, freshAttempt = false) => {
     if (!data.family.length) { notify('Add at least one family member first.'); return; }
-    const member = data.family[Math.floor(Math.random() * data.family.length)];
-    const options = Array.from(new Set([member.relationship, ...relationshipOptions.filter((item) => item !== member.relationship)])).slice(0, 4);
-    const familyGame: GameDefinition = { id: 101, name: 'Who Is This?', category: 'Recognition', icon: '💛', instruction: 'Look at the family photo and choose their relationship.', prompt: `What is ${member.name}’s relationship to you?`, options, answer: member.relationship };
-    launchGame(familyGame);
+    const progress = familyProgressFor(type);
+    const level = requestedLevel ?? progress.inProgress?.level ?? progress.currentLevel;
+    const restoredAnswer = progress.inProgress?.level === level ? progress.inProgress.selectedAnswer ?? '' : '';
+    const generated = createFamilyGame(type, level, data.family);
+    const savedState = !freshAttempt && progress.inProgress?.level === level ? progress.inProgress.state : undefined;
+    const member = savedState?.memberId ? data.family.find((item) => item.id === savedState.memberId) ?? generated.member : generated.member;
+    const game = savedState ? { ...generated.game, ...savedState } : generated.game;
+    game.replay = replay;
+    setFocusedGame(null);
+    setSelectedGame(game);
     setFamilyQuiz(member);
+    setSelectedAnswer(restoredAnswer);
+    setAnswerSaved(false);
+    setGameStartedAt(Date.now());
+    updateData((current) => ({
+      ...current,
+      familyGameProgress: {
+        ...current.familyGameProgress,
+        [type]: { ...(current.familyGameProgress[type] ?? newFamilyProgress(type)), currentLevel: level, inProgress: { level, selectedAnswer: restoredAnswer, startedAt: new Date().toISOString(), state: { prompt: game.prompt, options: game.options, answer: game.answer, memberId: member.id } }, updatedAt: new Date().toISOString() },
+      },
+    }));
+    go('game');
+  };
+
+  const retryCurrentLevel = () => {
+    if (!selectedGame) return;
+    if (selectedGame.familyType) startFamilyGame(selectedGame.familyType, selectedGame.level, selectedGame.replay, true);
+    else if (focusedGame) launchGame(focusedGame, selectedGame.level, selectedGame.replay, true);
+  };
+
+  const exitCurrentGame = () => {
+    setActiveSession(null);
+    go(selectedGame?.familyType ? 'family' : 'game-detail');
   };
 
   const addFamilyMember = async (event: FormEvent<HTMLFormElement>) => {
@@ -287,31 +380,43 @@ export default function MindCareApp() {
   };
 
   const runAssistant = (value = assistantInput) => {
-    const command = value.trim().toLowerCase();
+    const command = value.trim();
     if (!command) return;
+    const intent = detectMitraIntent(command, data.assistantContext.lastIntent);
     let reply = '';
-    if (/15.*(minute|min)|पंद्रह|१५|১৫/.test(command)) { reply = 'I started a balanced 15-minute session for you.'; startSession(15); }
-    else if (/start.*(game|खेल|খেল)|game.*start/.test(command)) { reply = 'I opened your recommended games.'; go('games'); }
-    else if (/drink|water|पानी|পানী/.test(command)) {
-      const reminder: Reminder = { id: uid('hydration'), type: 'hydration', title: 'Drink a glass of water', time: new Date(Date.now() + 30 * 60000).toTimeString().slice(0, 5), status: 'pending', createdAt: new Date().toISOString() };
-      updateData((current) => ({ ...current, reminders: [...current.reminders, reminder] })); reply = 'I added a water reminder for 30 minutes from now.';
+    if (intent === 'session') { reply = mitraReply(language, intent); startSession(15); }
+    else if (intent === 'game') {
+      reply = mitraReply(language, intent);
+      const resumable = GAME_LIBRARY.find((game) => Boolean(data.gameProgress[String(game.id)]?.inProgress));
+      if (/continue|resume|जारी|চালিয়ে|தொடர|కొనసాగ|पुढे|ચાલુ|ಮುಂದುವರಿ|തുടര|ਜਾਰੀ|আগবঢ়/.test(command.toLowerCase()) && resumable) openGame(resumable);
+      else go('games');
     }
-    else if (/medicine|दवा|ঔষধ/.test(command)) { const medicine = data.reminders.find((item) => item.type === 'medicine' && item.status === 'pending'); reply = medicine ? `Your next medicine is ${medicine.title} at ${medicine.time}.` : 'You have no pending medicine reminders.'; go('medicines'); }
-    else if (/what.*next|next.*do|आगे|পৰৱৰ্তী/.test(command)) { const next = data.routine.find((item) => !item.done); reply = next ? `Next is ${next.activity} at ${next.time}.` : 'Your routine is complete for today.'; go('routine'); }
-    else if (/progress|प्रगति|অগ্ৰগতি/.test(command)) { reply = 'I opened your cognitive activity progress.'; go('progress'); }
-    else if (/emergency|sos|call.*contact|आपात|জৰুৰী/.test(command)) { reply = 'Your emergency contact is ready. Tap Call to use your phone.'; setShowSos(true); }
-    else if (/family|परिवार|পৰিয়াল/.test(command)) { reply = 'I opened My Family.'; go('family'); }
-    else if (/language|भाषा|ভাষা/.test(command)) { reply = 'You can change the language in Settings.'; go('settings'); }
-    else if (/bigger|large text|बड़ा|ডাঙৰ/.test(command)) { updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, textSize: 'extra' } }) : current); reply = 'I made the text extra large.'; }
-    else if (/repeat|दोहर|আকৌ/.test(command)) { speak(assistantReply); return; }
-    else if (/stop|रुको|ৰʼবা/.test(command)) { window.speechSynthesis?.cancel(); reply = 'Stopped.'; }
-    else reply = 'I can start a game, start a 15-minute session, add a water reminder, check medicine, show what is next, open progress or family, change text size, or open SOS.';
+    else if (intent === 'water') {
+      const reminder: Reminder = { id: uid('hydration'), type: 'hydration', title: 'Drink a glass of water', time: new Date(Date.now() + 30 * 60000).toTimeString().slice(0, 5), status: 'pending', createdAt: new Date().toISOString() };
+      updateData((current) => ({ ...current, reminders: [...current.reminders, reminder] })); reply = mitraReply(language, intent);
+    }
+    else if (intent === 'medicine') { const medicine = data.reminders.find((item) => item.type === 'medicine' && item.status === 'pending'); reply = mitraReply(language, intent, { detail: medicine ? `${medicine.title} · ${medicine.time}` : 'not currently scheduled' }); go('medicines'); }
+    else if (intent === 'routine') { const next = data.routine.find((item) => !item.done); reply = mitraReply(language, intent, { detail: next ? `${next.activity} · ${next.time}` : 'complete for today' }); go('routine'); }
+    else if (intent === 'progress') { const average = data.results.length ? Math.round(data.results.reduce((sum, item) => sum + item.accuracy, 0) / data.results.length) : 0; reply = mitraReply(language, intent, { count: data.results.length, accuracy: average }); go('progress'); }
+    else if (intent === 'sos') { reply = mitraReply(language, intent); setShowSos(true); }
+    else if (intent === 'family') { reply = mitraReply(language, intent, { count: data.family.length }); go('family'); }
+    else if (intent === 'language') { reply = mitraReply(language, intent); go('settings'); }
+    else if (intent === 'large') { updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, textSize: 'extra' } }) : current); reply = mitraReply(language, intent); }
+    else if (intent === 'repeat') { reply = data.assistantContext.lastReply || assistantReply; speak(reply); }
+    else if (intent === 'stop') { window.speechSynthesis?.cancel(); reply = mitraReply(language, intent); }
+    else reply = mitraReply(language, intent);
+    const now = new Date().toISOString();
+    updateData((current) => ({
+      ...current,
+      conversations: [...current.conversations, { id: uid('message'), role: 'user', text: command, timestamp: now }, { id: uid('message'), role: 'assistant', text: reply, timestamp: now }].slice(-60),
+      assistantContext: { lastIntent: intent, lastReply: reply, updatedAt: now },
+    }));
     setAssistantReply(reply);
     setAssistantInput('');
-    speak(reply);
+    if (intent !== 'repeat') speak(reply);
   };
 
-  if (!ready) return <main className="app-loading" aria-live="polite">Preparing MindCare…</main>;
+  if (!ready) return <main className="app-loading" aria-live="polite">Preparing MindMitra…</main>;
   if (screen === 'onboarding') return <Onboarding authUser={authUser} profile={data.profile} initialRole={data.profile?.role ?? 'elder'} onSubmit={completeOnboarding} onBack={() => setScreen('welcome')} />;
   if (screen === 'welcome' || !data.profile) return <Welcome authUser={authUser} profileName={data.profile?.name ?? ''} language={language} onContinue={() => setScreen(data.profile?.role === 'caregiver' ? 'caregiver' : 'home')} onDemo={startDemo} onCreate={() => beginOnboarding('elder')} onCaregiver={() => beginOnboarding('caregiver')} />;
   if (screen === 'greeting') return <Greeting name={data.profile.name} language={language} onName={(name) => updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, name } }) : current)} onListen={listen} onContinue={() => go('home')} />;
@@ -319,6 +424,7 @@ export default function MindCareApp() {
   const page = (() => {
     if (screen === 'home') return renderHome();
     if (screen === 'games') return renderGames();
+    if (screen === 'game-detail') return renderGameDetail();
     if (screen === 'session') return renderSession();
     if (screen === 'game') return renderGame();
     if (screen === 'family') return renderFamily();
@@ -337,9 +443,9 @@ export default function MindCareApp() {
   return (
     <div className={`mindcare-app text-${data.profile.textSize} ${data.profile.highContrast ? 'high-contrast' : ''} ${data.profile.reducedMotion ? 'reduced-motion' : ''}`}>
       <aside className="side-nav" aria-label="Main navigation">
-        <button className="brand app-brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>MindCare <b>NER</b></span></button>
+        <button className="brand app-brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></button>
         <NavButton icon="⌂" label={t.home} active={screen === 'home'} onClick={() => go('home')} />
-        <NavButton icon="✦" label={t.games} active={['games', 'session', 'game'].includes(screen)} onClick={() => go('games')} />
+        <NavButton icon="✦" label={t.games} active={['games', 'game-detail', 'session', 'game'].includes(screen)} onClick={() => go('games')} />
         <NavButton icon="♡" label={t.family} active={screen === 'family'} onClick={() => go('family')} />
         <NavButton icon="↗" label={t.progress} active={screen === 'progress'} onClick={() => go('progress')} />
         <NavButton icon="⚙" label={t.settings} active={screen === 'settings'} onClick={() => go('settings')} />
@@ -348,7 +454,7 @@ export default function MindCareApp() {
       </aside>
       <div className="app-column">
         <header className="top-bar">
-          <button className="mobile-brand brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>MindCare <b>NER</b></span></button>
+          <button className="mobile-brand brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></button>
           <div className={`connection ${online ? '' : 'is-offline'}`}><i />{!online ? t.offline : syncStatus === 'syncing' ? t.syncing : syncStatus === 'synced' ? t.synced : t.online}</div>
           <button className="mitra-quick" onClick={() => go('assistant')}><span>◉</span>{t.assistant}</button>
           <button className="sos-quick" onClick={() => setShowSos(true)}>! <span>{t.sos}</span></button>
@@ -357,7 +463,7 @@ export default function MindCareApp() {
         <main className="app-content">{page}</main>
         <nav className="bottom-nav" aria-label="Mobile navigation">
           <NavButton icon="⌂" label={t.home} active={screen === 'home'} onClick={() => go('home')} />
-          <NavButton icon="✦" label={t.games} active={['games', 'session', 'game'].includes(screen)} onClick={() => go('games')} />
+          <NavButton icon="✦" label={t.games} active={['games', 'game-detail', 'session', 'game'].includes(screen)} onClick={() => go('games')} />
           <NavButton icon="♡" label={t.family} active={screen === 'family'} onClick={() => go('family')} />
           <NavButton icon="◉" label="Mitra" active={screen === 'assistant'} onClick={() => go('assistant')} />
           <NavButton icon="⚙" label={t.settings} active={screen === 'settings'} onClick={() => go('settings')} />
@@ -383,7 +489,7 @@ export default function MindCareApp() {
     ];
     return <>
       <section className="greeting-panel">
-        <div><span className="section-kicker">{t.today} · {new Intl.DateTimeFormat(language === 'hi' ? 'hi-IN' : language === 'as' ? 'as-IN' : 'en-IN', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date())}</span><h1>{t.greeting}, <em>{data.profile?.name.split(' ')[0]}</em> <span>👋</span></h1><p>You have <b>{data.routine.filter((item) => !item.done).length} {t.activities}</b> and <b>{pending.length} {t.reminder}</b> today.</p></div>
+        <div><span className="section-kicker">{t.today} · {new Intl.DateTimeFormat(LANGUAGE_LOCALES[language], { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date())}</span><h1>{t.greeting}, <em>{data.profile?.name.split(' ')[0]}</em> <span>👋</span></h1><p>You have <b>{data.routine.filter((item) => !item.done).length} {t.activities}</b> and <b>{pending.length} {t.reminder}</b> today.</p></div>
         <button className="session-cta" onClick={() => startSession(data.profile?.sessionPreference ?? 15)}><span>✦</span><div><small>Recommended</small><b>Start a gentle session</b></div><i>→</i></button>
       </section>
       <section className="today-strip">
@@ -402,15 +508,30 @@ export default function MindCareApp() {
     const filtered = GAME_LIBRARY.filter((game) => (gameCategory === 'All' || game.category === gameCategory) && game.name.toLowerCase().includes(gameSearch.toLowerCase()));
     const recommended = [...CATEGORIES].sort((a, b) => difficultyRank(difficultyFor(a, data.results)) - difficultyRank(difficultyFor(b, data.results))).slice(0, 3).map((category) => GAME_LIBRARY.find((game) => game.category === category)!).filter(Boolean);
     return <>
-      <PageHeader kicker="Game center" title="Choose a gentle activity" text="Every game is short, clear, and adapts separately to your recent performance." onBack={() => go('home')} />
+      <PageHeader kicker="Game center" title="Choose a gentle activity" text="Every game has 10 meaningful levels. Your exact place is saved automatically." onBack={() => go('home')} />
       <div className="game-actions"><button className="primary-action" onClick={() => go('session')}>◷ Start a balanced session</button><label className="search-box">⌕<input value={gameSearch} onChange={(event) => setGameSearch(event.target.value)} placeholder="Find a game" /></label></div>
-      <section><div className="section-heading compact"><div><span className="section-kicker">{t.recommended}</span><h2>Good choices for today</h2></div></div><div className="recommended-row">{recommended.map((game) => <GameCard key={game.id} game={game} difficulty={difficultyFor(game.category, data.results)} favorite={data.favorites.includes(game.id)} mine={data.myGames.includes(game.id)} onPlay={() => launchGame(game)} onFavorite={() => toggleNumber('favorites', game.id)} onMine={() => toggleNumber('myGames', game.id)} />)}</div></section>
-      <section><div className="section-heading compact"><div><span className="section-kicker">{t.allGames} · {GAME_LIBRARY.length}</span><h2>Explore every activity</h2></div></div><div className="category-tabs"><button className={gameCategory === 'All' ? 'active' : ''} onClick={() => setGameCategory('All')}>All</button>{CATEGORIES.map((category) => <button className={gameCategory === category ? 'active' : ''} key={category} onClick={() => setGameCategory(category)}>{category}</button>)}</div><div className="game-grid">{filtered.map((game) => <GameCard key={game.id} game={game} difficulty={difficultyFor(game.category, data.results)} favorite={data.favorites.includes(game.id)} mine={data.myGames.includes(game.id)} onPlay={() => launchGame(game)} onFavorite={() => toggleNumber('favorites', game.id)} onMine={() => toggleNumber('myGames', game.id)} />)}</div></section>
+      <section><div className="section-heading compact"><div><span className="section-kicker">{t.recommended}</span><h2>Good choices for today</h2></div></div><div className="recommended-row">{recommended.map((game) => <GameCard key={game.id} game={game} difficulty={difficultyFor(game.category, data.results)} progress={gameProgressFor(game.id)} favorite={data.favorites.includes(game.id)} mine={data.myGames.includes(game.id)} onPlay={() => openGame(game)} onFavorite={() => toggleNumber('favorites', game.id)} onMine={() => toggleNumber('myGames', game.id)} />)}</div></section>
+      <section><div className="section-heading compact"><div><span className="section-kicker">{t.allGames} · {GAME_LIBRARY.length} · 400 levels</span><h2>Explore every activity</h2></div></div><div className="category-tabs"><button className={gameCategory === 'All' ? 'active' : ''} onClick={() => setGameCategory('All')}>All</button>{CATEGORIES.map((category) => <button className={gameCategory === category ? 'active' : ''} key={category} onClick={() => setGameCategory(category)}>{category}</button>)}</div><div className="game-grid">{filtered.map((game) => <GameCard key={game.id} game={game} difficulty={difficultyFor(game.category, data.results)} progress={gameProgressFor(game.id)} favorite={data.favorites.includes(game.id)} mine={data.myGames.includes(game.id)} onPlay={() => openGame(game)} onFavorite={() => toggleNumber('favorites', game.id)} onMine={() => toggleNumber('myGames', game.id)} />)}</div></section>
     </>;
   }
 
   function toggleNumber(field: 'favorites' | 'myGames', id: number) {
     updateData((current) => ({ ...current, [field]: current[field].includes(id) ? current[field].filter((value) => value !== id) : [...current[field], id] }));
+  }
+
+  function renderGameDetail() {
+    if (!focusedGame) return null;
+    const progress = gameProgressFor(focusedGame.id);
+    const finished = progress.completedLevels.length === 10;
+    return <>
+      <PageHeader kicker={`${focusedGame.category} · 10 levels`} title={focusedGame.name} text={focusedGame.instruction} onBack={() => go('games')} />
+      <section className="level-overview card-panel">
+        <div className="level-overview-head"><div className={`game-icon game-${focusedGame.category.toLowerCase()}`}>{focusedGame.icon}</div><div><span>{progress.completedLevels.length} of 10 completed</span><h2>{finished ? 'All levels complete!' : progress.inProgress ? `Ready to resume Level ${progress.inProgress.level}` : `Level ${progress.currentLevel} is ready`}</h2><p>Your progress is saved on this device and synced with your account when signed in.</p></div></div>
+        <div className="level-progress-track"><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></div>
+        <div className="level-grid" aria-label="Game levels">{Array.from({ length: 10 }, (_, index) => index + 1).map((level) => { const complete = progress.completedLevels.includes(level); const unlocked = level <= progress.unlockedLevel; return <button key={level} disabled={!unlocked} className={`${complete ? 'complete' : ''} ${progress.inProgress?.level === level ? 'current' : ''}`} onClick={() => launchGame(focusedGame, level, finished)}><small>{complete ? '✓' : unlocked ? 'Level' : 'Locked'}</small><b>{level}</b></button>; })}</div>
+        <div className="level-actions">{finished ? <button className="primary-action" onClick={() => { updateData((current) => { const old = current.gameProgress[String(focusedGame.id)] ?? newGameProgress(focusedGame.id); return { ...current, gameProgress: { ...current.gameProgress, [String(focusedGame.id)]: { ...old, currentLevel: 1, replayCount: old.replayCount + 1, updatedAt: new Date().toISOString() } } }; }); launchGame(focusedGame, 1, true); }}>↻ Replay game with a fresh shuffle</button> : <button className="primary-action" onClick={() => launchGame(focusedGame, progress.inProgress?.level ?? progress.currentLevel)}>{progress.inProgress ? 'Continue game' : 'Start level'} →</button>}<button className="secondary-action" onClick={() => go('games')}>Exit</button></div>
+      </section>
+    </>;
   }
 
   function renderSession() {
@@ -423,28 +544,29 @@ export default function MindCareApp() {
     if (!selectedGame) return null;
     const difficulty = difficultyFor(selectedGame.category, data.results);
     return <div className="game-stage">
-      <div className="game-top"><button className="back-button" onClick={() => { setActiveSession(null); go('games'); }}>← {t.back}</button>{activeSession && <div className="session-progress"><span style={{ width: `${((activeSession.index + 1) / activeSession.games.length) * 100}%` }} /><b>{activeSession.index + 1} of {activeSession.games.length}</b></div>}<button className="mini-sos" onClick={() => setShowSos(true)}>! SOS</button></div>
-      <section className="play-card"><div className="play-meta"><span>{selectedGame.icon}</span><div><small>{selectedGame.category} · {difficulty}</small><h1>{selectedGame.name}</h1></div></div><p className="instruction">{CATEGORY_INSTRUCTIONS[language][selectedGame.category]}</p>
+      <div className="game-top"><button className="back-button" onClick={exitCurrentGame}>← Exit game</button>{activeSession ? <div className="session-progress"><span style={{ width: `${((activeSession.index + 1) / activeSession.games.length) * 100}%` }} /><b>{activeSession.index + 1} of {activeSession.games.length}</b></div> : <div className="session-progress level-session-progress"><span style={{ width: `${selectedGame.level * 10}%` }} /><b>Level {selectedGame.level} of 10</b></div>}<button className="mini-sos" onClick={() => setShowSos(true)}>! SOS</button></div>
+      <section className="play-card"><div className="play-meta"><span>{selectedGame.icon}</span><div><small>{selectedGame.category} · {difficulty} · Level {selectedGame.level}</small><h1>{selectedGame.name}</h1></div></div><p className="instruction">{selectedGame.instruction || CATEGORY_INSTRUCTIONS[language]?.[selectedGame.category] || CATEGORY_INSTRUCTIONS.en![selectedGame.category]}</p>
         {familyQuiz && <FamilyPortrait member={familyQuiz} large />}
         <h2 className="game-prompt">{selectedGame.prompt}</h2>
-        <div className="answer-grid">{selectedGame.options.map((option) => <button disabled={answerSaved} className={`${selectedAnswer === option ? 'selected' : ''} ${answerSaved && option === selectedGame.answer ? 'correct' : ''} ${answerSaved && selectedAnswer === option && option !== selectedGame.answer ? 'wrong' : ''}`} key={option} onClick={() => setSelectedAnswer(option)}><span>{option}</span><i>{selectedAnswer === option ? '✓' : ''}</i></button>)}</div>
-        {!answerSaved ? <button className="primary-action wide" disabled={!selectedAnswer} onClick={saveGameAnswer}>Check my answer</button> : <div className={`answer-feedback ${selectedAnswer === selectedGame.answer ? 'correct' : 'gentle'}`}><span>{selectedAnswer === selectedGame.answer ? '✓' : '♡'}</span><div><b>{selectedAnswer === selectedGame.answer ? 'Well done!' : 'Good try — practice helps.'}</b><p>{selectedAnswer === selectedGame.answer ? 'That is the right answer.' : `The answer is ${selectedGame.answer}.`}</p></div><button onClick={continueAfterGame}>{activeSession ? 'Continue session' : 'Back to games'} →</button></div>}
+        <div className="answer-grid">{selectedGame.options.map((option) => <button disabled={answerSaved} className={`${selectedAnswer === option ? 'selected' : ''} ${answerSaved && option === selectedGame.answer ? 'correct' : ''} ${answerSaved && selectedAnswer === option && option !== selectedGame.answer ? 'wrong' : ''}`} key={option} onClick={() => selectAnswer(option)}><span>{option}</span><i>{selectedAnswer === option ? '✓' : ''}</i></button>)}</div>
+        {!answerSaved ? <button className="primary-action wide" disabled={!selectedAnswer} onClick={saveGameAnswer}>Check my answer</button> : <div className={`answer-feedback ${selectedAnswer === selectedGame.answer ? 'correct' : 'gentle'}`}><span>{selectedAnswer === selectedGame.answer ? '✓' : '♡'}</span><div><b>{selectedAnswer === selectedGame.answer ? 'Well done — level complete!' : 'Good try — practice helps.'}</b><p>{selectedAnswer === selectedGame.answer ? (selectedGame.level === 10 ? 'You completed the final level.' : `Level ${Math.min(10, selectedGame.level + 1)} is now unlocked.`) : `The answer is ${selectedGame.answer}. Try this level again when you are ready.`}</p></div>{selectedAnswer === selectedGame.answer || activeSession ? <button onClick={continueAfterGame}>{activeSession ? 'Continue session' : selectedGame.familyType ? 'Back to family games' : 'View levels'} →</button> : <button onClick={retryCurrentLevel}>Try again ↻</button>}</div>}
+        <button className="exit-game-button" onClick={exitCurrentGame}>Save and exit game</button>
       </section>
     </div>;
   }
 
   function renderFamily() {
-    return <><PageHeader kicker="Personal memories" title="My Family" text="Add people who matter to you. Photos stay private and are used only to create your personal memory activities." onBack={() => go('home')} action={<button className="primary-action" onClick={startFamilyGame}>♡ Play family game</button>} />
+    return <><PageHeader kicker="Personal memories" title="My Family" text="Add people who matter to you. Photos stay private and are used only to create your personal memory activities." onBack={() => go('home')} action={<button className="primary-action" onClick={() => startFamilyGame('who')}>♡ Play family game</button>} />
       <div className="family-layout"><section className="family-list card-panel"><div className="panel-title"><div><span className="section-kicker">Your circle</span><h2>{data.family.length} family members</h2></div></div>{data.family.length ? <div className="family-grid">{data.family.map((member) => <article key={member.id}><FamilyPortrait member={member} /><div><h3>{member.name}</h3><p>{member.relationship}{member.nickname ? ` · “${member.nickname}”` : ''}</p></div><button aria-label={`Remove ${member.name}`} onClick={() => updateData((current) => ({ ...current, family: current.family.filter((item) => item.id !== member.id) }))}>×</button></article>)}</div> : <EmptyState icon="♡" title="Add your first family memory" text="A name, relationship, and optional photo are enough to begin." />}</section>
       <section className="card-panel form-panel"><span className="section-kicker">Add someone</span><h2>Create a family profile</h2><form onSubmit={addFamilyMember} className="stack-form"><label>Full name<input name="name" required placeholder="e.g. Raj Das" /></label><div className="two-fields"><label>Relationship<select name="relationship" required defaultValue=""><option value="" disabled>Choose</option>{relationshipOptions.map((item) => <option key={item}>{item}</option>)}</select></label><label>Nickname (optional)<input name="nickname" placeholder="e.g. Raju" /></label></div><label className="upload-field">Photo (optional)<input type="file" name="photo" accept="image/*" capture="user" /><small>Take a photo or choose one from your phone. Maximum 5 MB.</small></label><button className="primary-action wide" type="submit">Add to My Family</button></form></section></div>
-      <section className="memory-modes"><article><span>👤</span><h3>Who Is This?</h3><p>Choose a person’s relationship from their profile.</p><button onClick={startFamilyGame}>Play</button></article><article><span>▦</span><h3>Match Name to Face</h3><p>Use saved names and pictures in a gentle match.</p><button onClick={startFamilyGame}>Play</button></article><article><span>↔</span><h3>Remember the Family</h3><p>Practice with the people most familiar to you.</p><button onClick={startFamilyGame}>Play</button></article></section>
+      <section className="memory-modes">{(Object.keys(FAMILY_GAME_META) as FamilyGameType[]).map((type) => { const meta = FAMILY_GAME_META[type]; const progress = familyProgressFor(type); const finished = progress.completedLevels.length === 10; return <article key={type}><span>{meta.icon}</span><h3>{meta.name}</h3><p>{meta.description}</p><div className="mini-level-track"><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></div><small>{progress.completedLevels.length}/10 levels complete</small><div className="family-levels">{Array.from({ length: 10 }, (_, index) => index + 1).map((level) => <button key={level} disabled={level > progress.unlockedLevel} className={progress.completedLevels.includes(level) ? 'complete' : ''} onClick={() => startFamilyGame(type, level, finished)}>{progress.completedLevels.includes(level) ? '✓' : level}</button>)}</div><button onClick={() => { if (finished) updateData((current) => { const old = current.familyGameProgress[type] ?? newFamilyProgress(type); return { ...current, familyGameProgress: { ...current.familyGameProgress, [type]: { ...old, currentLevel: 1, replayCount: old.replayCount + 1, updatedAt: new Date().toISOString() } } }; }); startFamilyGame(type, finished ? 1 : progress.inProgress?.level ?? progress.currentLevel, finished); }}>{finished ? 'Replay with fresh questions' : progress.inProgress ? `Continue Level ${progress.inProgress.level}` : `Play Level ${progress.currentLevel}`}</button></article>; })}</section>
     </>;
   }
 
   function renderReminderPage(type: 'medicine' | 'appointment') {
     const isMedicine = type === 'medicine';
     const items = data.reminders.filter((item) => item.type === type);
-    return <><PageHeader kicker="Daily support" title={isMedicine ? 'Medicine reminders' : 'Appointments'} text={isMedicine ? 'Record reminders only for medicines already prescribed to you. MindCare does not recommend medication.' : 'Keep doctor visits, times, locations, and notes together.'} onBack={() => go('home')} />
+    return <><PageHeader kicker="Daily support" title={isMedicine ? 'Medicine reminders' : 'Appointments'} text={isMedicine ? 'Record reminders only for medicines already prescribed to you. MindMitra does not recommend medication.' : 'Keep doctor visits, times, locations, and notes together.'} onBack={() => go('home')} />
       <div className="two-column"><section className="card-panel"><div className="panel-title"><h2>{isMedicine ? 'Your medicines' : 'Upcoming appointments'}</h2></div>{items.length ? <div className="reminder-list">{items.map((item) => <ReminderRow key={item.id} item={item} onStatus={setReminderStatus} />)}</div> : <EmptyState icon={isMedicine ? '✚' : '▣'} title="Nothing added yet" text="Use the form to create your first reminder." />}</section>
       <section className="card-panel form-panel"><span className="section-kicker">New {isMedicine ? 'medicine' : 'appointment'}</span><h2>Add a reminder</h2><form className="stack-form" onSubmit={(event) => addReminder(event, type)}><label>{isMedicine ? 'Medicine name' : 'Doctor name'}<input name="title" required /></label><div className="two-fields"><label>Date<input type="date" name="date" required={!isMedicine} /></label><label>Time<input type="time" name="time" required /></label></div>{isMedicine ? <><div className="two-fields"><label>Dosage description<input name="dosage" placeholder="e.g. 1 tablet" /></label><label>Frequency<select name="frequency"><option>Daily</option><option>Twice daily</option><option>Weekly</option><option>As prescribed</option></select></label></div><div className="two-fields"><label>Start date<input type="date" name="startDate" /></label><label>End date<input type="date" name="endDate" /></label></div></> : <label>Location<input name="location" /></label>}<label>Notes<textarea name="notes" rows={3} /></label><button className="primary-action wide" type="submit">{t.save} reminder</button></form></section></div>
     </>;
@@ -477,23 +599,24 @@ export default function MindCareApp() {
 
   function renderAssistant() {
     const examples = ['Start a game', 'Start a 15 minute session', 'Remind me to drink water', 'When is my medicine?', 'What should I do next?', 'Open my family'];
-    return <><PageHeader kicker="Your voice companion" title="Talk to Mitra" text="Mitra uses simple on-device commands to perform actions in MindCare. You can speak or type." onBack={() => go('home')} />
-      <section className="assistant-card"><div className="mitra-avatar"><span>◉</span><i /></div><div className="chat-bubble"><small>Mitra</small><p>{assistantReply}</p><button onClick={() => speak(assistantReply)}>🔊 Hear this</button></div><div className="assistant-compose"><input aria-label="Message Mitra" value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') runAssistant(); }} placeholder="Type a request…" /><button className="voice-button" onClick={() => listen((value) => { setAssistantInput(value); runAssistant(value); })} aria-label="Speak to Mitra">🎤</button><button className="send-button" onClick={() => runAssistant()}>Send</button></div><div className="command-chips">{examples.map((example) => <button key={example} onClick={() => runAssistant(example)}>{example}</button>)}</div></section>
-      <p className="privacy-note">Mitra’s built-in commands work without sending your conversation to an external AI service.</p>
+    const conversation = data.conversations.slice(-12);
+    return <><PageHeader kicker="Your voice companion" title="Talk to Mitra" text={`Speak or type naturally. Mitra remembers the recent conversation and responds in ${LANGUAGE_OPTIONS.find((item) => item.value === language)?.label}.`} onBack={() => go('home')} />
+      <section className="assistant-card"><div className="mitra-avatar"><span>◉</span><i /></div><div className="conversation" aria-live="polite">{conversation.length ? conversation.map((message) => <div key={message.id} className={`chat-bubble ${message.role === 'user' ? 'user' : ''}`}><small>{message.role === 'user' ? 'You' : 'Mitra'}</small><p>{message.text}</p>{message.role === 'assistant' && <button onClick={() => speak(message.text)}>🔊 Hear this</button>}</div>) : <div className="chat-bubble"><small>Mitra</small><p>{mitraReply(language, 'greeting')}</p><button onClick={() => speak(mitraReply(language, 'greeting'))}>🔊 Hear this</button></div>}</div><div className="assistant-compose"><input aria-label="Message Mitra" value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') runAssistant(); }} placeholder="Type a message or request…" /><button className="voice-button" onClick={() => listen((value) => { setAssistantInput(value); runAssistant(value); })} aria-label="Speak to Mitra">🎤</button><button className="send-button" onClick={() => runAssistant()}>Send</button></div><div className="command-chips">{examples.map((example) => <button key={example} onClick={() => runAssistant(example)}>{example}</button>)}</div></section>
+      <p className="privacy-note">Mitra keeps recent conversation context in your saved MindMitra data. Its built-in companion features do not send the conversation to an external AI service.</p>
     </>;
   }
 
   function renderSettings() {
-    return <><PageHeader kicker="Make MindCare yours" title="Settings & Profile" text="Changes apply immediately and are saved for this account." onBack={() => go('home')} />
+    return <><PageHeader kicker="Make MindMitra yours" title="Settings & Profile" text="Changes apply immediately and are saved for this account." onBack={() => go('home')} />
       <div className="settings-layout"><section className="card-panel"><div className="setting-row"><div><b>Text size</b><p>Choose the most comfortable reading size.</p></div><div className="segmented">{(['normal', 'large', 'extra'] as const).map((size) => <button className={data.profile?.textSize === size ? 'active' : ''} key={size} onClick={() => updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, textSize: size } }) : current)}>{size === 'extra' ? 'Extra large' : titleCase(size)}</button>)}</div></div>
         <Toggle label="High contrast" text="Stronger colors and borders." checked={data.profile?.highContrast ?? false} onChange={(checked) => updateProfile('highContrast', checked)} />
         <Toggle label="Voice responses" text="Let Mitra read helpful responses aloud." checked={data.profile?.voice ?? false} onChange={(checked) => updateProfile('voice', checked)} />
         <Toggle label="Sound effects" text="Play gentle success feedback." checked={data.profile?.sound ?? false} onChange={(checked) => updateProfile('sound', checked)} />
         <Toggle label="Reduced motion" text="Turn off movement and transitions." checked={data.profile?.reducedMotion ?? false} onChange={(checked) => updateProfile('reducedMotion', checked)} />
-        <div className="setting-row"><div><b>Language</b><p>Changes navigation, greetings, game guidance, and voice.</p></div><select value={language} onChange={(event) => updateProfile('language', event.target.value as Language)}><option value="en">English</option><option value="hi">हिन्दी</option><option value="as">অসমীয়া</option></select></div>
+        <div className="setting-row"><div><b>Mitra language</b><p>Mitra’s text and voice use your selected language. Core navigation falls back to English where a translation is not yet available.</p></div><select value={language} onChange={(event) => updateProfile('language', event.target.value as Language)}><LanguageOptionList /></select></div>
         <div className="setting-row"><div><b>Notifications</b><p>Allow medicine, hydration, appointment, and routine alerts.</p></div><button className="secondary-action" onClick={requestNotifications}>Enable</button></div></section>
       <section className="card-panel profile-settings"><span className="section-kicker">Profile</span><h2>{data.profile?.name}</h2><p>{data.profile?.phone}<br />{data.profile?.email}</p><div className="emergency-box"><small>Emergency contact</small><b>{data.profile?.emergencyName}</b><span>{data.profile?.emergencyRelationship} · {data.profile?.emergencyPhone}</span></div><div className="code-box"><small>Caregiver connection code</small><b>{data.profile?.caregiverCode}</b><p>Share only with a caregiver you trust.</p></div><button className="secondary-action wide" onClick={() => setScreen('onboarding')}>Edit profile</button><button className="secondary-action wide profile-logout" onClick={() => { if (authUser) window.location.href = '/signout-with-chatgpt?return_to=%2F'; else setScreen('welcome'); }}>Log out</button><button className="danger-link" onClick={deleteAccount}>Delete my account and data</button></section></div>
-      <details className="disclaimer"><summary>Important medical disclaimer</summary><p>MindCare NER is designed for cognitive engagement, memory assistance, and daily activity support. It is not a medical diagnostic or treatment device. Game performance should not be interpreted as a diagnosis of dementia or any other medical condition. Please consult a qualified healthcare professional for medical concerns.</p></details>
+      <details className="disclaimer"><summary>Important medical disclaimer</summary><p>MindMitra is designed for cognitive engagement, memory assistance, and daily activity support. It is not a medical diagnostic or treatment device. Game performance should not be interpreted as a diagnosis of dementia or any other medical condition. Please consult a qualified healthcare professional for medical concerns.</p></details>
     </>;
   }
 
@@ -541,24 +664,25 @@ interface SpeechRecognitionLike {
 
 function Welcome({ authUser, profileName, language, onContinue, onDemo, onCreate, onCaregiver }: { authUser: AuthUser | null; profileName: string; language: Language; onContinue: () => void; onDemo: () => void; onCreate: () => void; onCaregiver: () => void }) {
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(language);
-  const copy = {
-    en: { eyebrow: 'A calmer day, one small step at a time', title: 'Welcome to MindCare NER', intro: 'A simple way to keep your mind active, remember your daily routine, and stay connected.', signIn: profileName ? `Continue as ${profileName}` : authUser ? `Continue as ${authUser.displayName}` : 'Sign in securely', create: 'Create on this device', demo: 'Try demo account', note: 'Cognitive engagement and daily support — never a medical diagnosis.' },
-    hi: { eyebrow: 'हर दिन, एक छोटा और सरल कदम', title: 'MindCare NER में आपका स्वागत है', intro: 'मन को सक्रिय रखने, दिनचर्या याद रखने और अपनों से जुड़े रहने का आसान तरीका।', signIn: profileName ? `${profileName} के रूप में जारी रखें` : authUser ? `${authUser.displayName} के रूप में जारी रखें` : 'सुरक्षित साइन इन', create: 'इस डिवाइस पर खाता बनाएँ', demo: 'डेमो खाता आज़माएँ', note: 'मानसिक सक्रियता और दैनिक सहायता — चिकित्सीय निदान नहीं।' },
-    as: { eyebrow: 'প্ৰতিদিন, এটা সৰু আৰু সহজ পদক্ষেপ', title: 'MindCare NER-লৈ স্বাগতম', intro: 'মন সক্ৰিয় ৰাখিবলৈ, দৈনিক কাম মনত ৰাখিবলৈ আৰু আপোনজনৰ সৈতে সংযুক্ত হৈ থাকিবলৈ এটা সহজ উপায়।', signIn: profileName ? `${profileName} হিচাপে আগবাঢ়ক` : authUser ? `${authUser.displayName} হিচাপে আগবাঢ়ক` : 'সুৰক্ষিতভাৱে ছাইন ইন', create: 'এই ডিভাইচত একাউণ্ট খোলক', demo: 'ডেমʼ একাউণ্ট ব্যৱহাৰ কৰক', note: 'মানসিক সক্ৰিয়তা আৰু দৈনিক সহায় — চিকিৎসাগত নিৰ্ণয় নহয়।' },
-  }[selectedLanguage];
-  return <main className="welcome-page"><nav className="welcome-nav"><span className="brand"><span className="brand-mark">m</span><span>MindCare <b>NER</b></span></span><label className="language-picker"><span className="sr-only">Choose language</span><select value={selectedLanguage} onChange={(event) => setSelectedLanguage(event.target.value as Language)}><option value="en">English</option><option value="hi">हिन्दी</option><option value="as">অসমীয়া</option></select></label></nav>
+  const welcomeCopy = {
+    en: { eyebrow: 'A calmer day, one small step at a time', title: 'Welcome to MindMitra', intro: 'A simple way to keep your mind active, remember your daily routine, and stay connected.', signIn: profileName ? `Continue as ${profileName}` : authUser ? `Continue as ${authUser.displayName}` : 'Sign in securely', create: 'Create on this device', demo: 'Try demo account', note: 'Cognitive engagement and daily support — never a medical diagnosis.' },
+    hi: { eyebrow: 'हर दिन, एक छोटा और सरल कदम', title: 'MindMitra में आपका स्वागत है', intro: 'मन को सक्रिय रखने, दिनचर्या याद रखने और अपनों से जुड़े रहने का आसान तरीका।', signIn: profileName ? `${profileName} के रूप में जारी रखें` : authUser ? `${authUser.displayName} के रूप में जारी रखें` : 'सुरक्षित साइन इन', create: 'इस डिवाइस पर खाता बनाएँ', demo: 'डेमो खाता आज़माएँ', note: 'मानसिक सक्रियता और दैनिक सहायता — चिकित्सीय निदान नहीं।' },
+    as: { eyebrow: 'প্ৰতিদিন, এটা সৰু আৰু সহজ পদক্ষেপ', title: 'MindMitra-লৈ স্বাগতম', intro: 'মন সক্ৰিয় ৰাখিবলৈ, দৈনিক কাম মনত ৰাখিবলৈ আৰু আপোনজনৰ সৈতে সংযুক্ত হৈ থাকিবলৈ এটা সহজ উপায়।', signIn: profileName ? `${profileName} হিচাপে আগবাঢ়ক` : authUser ? `${authUser.displayName} হিচাপে আগবাঢ়ক` : 'সুৰক্ষিতভাৱে ছাইন ইন', create: 'এই ডিভাইচত একাউণ্ট খোলক', demo: 'ডেমʼ একাউণ্ট ব্যৱহাৰ কৰক', note: 'মানসিক সক্ৰিয়তা আৰু দৈনিক সহায় — চিকিৎসাগত নিৰ্ণয় নহয়।' },
+  };
+  const copy = welcomeCopy[selectedLanguage as keyof typeof welcomeCopy] ?? welcomeCopy.en;
+  return <main className="welcome-page"><nav className="welcome-nav"><span className="brand"><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></span><label className="language-picker"><span className="sr-only">Choose language</span><select value={selectedLanguage} onChange={(event) => setSelectedLanguage(event.target.value as Language)}><LanguageOptionList /></select></label></nav>
     <section className="welcome-hero"><div className="hero-copy"><span className="eyebrow"><i />{copy.eyebrow}</span><h1>{copy.title}</h1><p className="hero-intro">{copy.intro}</p><div className="welcome-actions">{profileName ? <button className="button button-primary" onClick={onContinue}>{copy.signIn}<span>→</span></button> : authUser ? <button className="button button-primary" onClick={onCreate}>{copy.signIn}<span>→</span></button> : <a className="button button-primary" href="/signin-with-chatgpt?return_to=%2F">{copy.signIn}<span>→</span></a>}<button className="button button-secondary" onClick={onCreate}>{copy.create}</button><button className="button button-quiet" onClick={onDemo}>{copy.demo}<span>↗</span></button></div><button className="caregiver-entry" onClick={onCaregiver}>I’m a caregiver <span>→</span></button><p className="trust-note"><span>✓</span>{copy.note}</p></div>
       <div className="hero-art" aria-label="A gentle illustration representing care, memory, and daily wellbeing"><div className="sun" /><div className="cloud cloud-one" /><div className="cloud cloud-two" /><div className="hill hill-back" /><div className="hill hill-front" /><div className="care-card"><div className="portrait"><span>👵🏽</span></div><div><p>Good morning, Maya</p><small>You have 2 gentle activities today.</small></div></div><div className="floating-pill pill-memory"><span>✦</span><b>Mind active</b></div><div className="floating-pill pill-routine"><span>✓</span><b>Routine ready</b></div></div></section>
     <section className="welcome-benefits"><article><span>✦</span><div><h2>Gentle brain games</h2><p>40 short activities that adapt to you.</p></div></article><article><span>☀</span><div><h2>Daily support</h2><p>Friendly reminders for routines, water, and medicine.</p></div></article><article><span>⌂</span><div><h2>Family connection</h2><p>Meaningful games made from your own memories.</p></div></article></section></main>;
 }
 
 function Onboarding({ authUser, profile, initialRole, onSubmit, onBack }: { authUser: AuthUser | null; profile: AppData['profile']; initialRole: 'elder' | 'caregiver'; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onBack: () => void }) {
-  return <main className="onboarding-page"><header><button className="brand" onClick={onBack}><span className="brand-mark">m</span><span>MindCare <b>NER</b></span></button><span>Private · elderly-friendly setup</span></header><section className="onboarding-card"><div className="onboarding-heading"><span className="section-kicker">Let’s set up your support</span><h1>{profile ? 'Edit your MindCare profile' : 'Create your MindCare profile'}</h1><p>Large, simple fields. You can change these details later.</p></div><form onSubmit={onSubmit} className="onboarding-form"><fieldset><legend><span>1</span> Personal information</legend><div className="form-grid"><label className="span-two">Full name<input name="name" required defaultValue={profile?.name ?? authUser?.fullName ?? ''} placeholder="Your full name" /></label><label>Date of birth<input type="date" name="dateOfBirth" required defaultValue={profile?.dateOfBirth ?? ''} /></label><label>Gender (optional)<select name="gender" defaultValue={profile?.gender ?? ''}><option value="">Prefer not to say</option><option>Female</option><option>Male</option><option>Non-binary</option><option>Other</option></select></label><label>Personal phone<input name="phone" type="tel" required placeholder="Your phone number" defaultValue={profile?.phone ?? ''} /></label><label>Email (optional)<input name="email" type="email" defaultValue={profile?.email ?? authUser?.email ?? ''} /></label><label>Preferred language<select name="language" defaultValue={profile?.language ?? 'en'}><option value="en">English</option><option value="hi">हिन्दी</option><option value="as">অসমীয়া</option></select></label><label>Profile type<select name="role" defaultValue={initialRole}><option value="elder">Elderly user</option><option value="caregiver">Caregiver</option></select></label></div></fieldset><fieldset><legend><span>2</span> SOS emergency contact</legend><p>This number will be used as your emergency contact and must be different from your personal phone.</p><div className="form-grid"><label>Contact name<input name="emergencyName" required defaultValue={profile?.emergencyName ?? ''} /></label><label>Emergency phone<input name="emergencyPhone" type="tel" required defaultValue={profile?.emergencyPhone ?? ''} /></label><label className="span-two">Relationship<select name="relationship" required defaultValue={profile?.emergencyRelationship ?? ''}><option value="" disabled>Choose relationship</option>{relationshipOptions.map((item) => <option key={item}>{item}</option>)}</select></label></div></fieldset><label className="consent-check"><input type="checkbox" required defaultChecked={Boolean(profile)} /><span>I understand that MindCare supports cognitive engagement and daily activity. It is not a medical diagnostic or treatment device.</span></label><div className="form-actions"><button type="button" className="secondary-action" onClick={onBack}>Back</button><button className="primary-action" type="submit">{profile ? 'Save profile' : 'Create profile'} →</button></div></form></section></main>;
+  return <main className="onboarding-page"><header><button className="brand" onClick={onBack}><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></button><span>Private · elderly-friendly setup</span></header><section className="onboarding-card"><div className="onboarding-heading"><span className="section-kicker">Let’s set up your support</span><h1>{profile ? 'Edit your MindMitra profile' : 'Create your MindMitra profile'}</h1><p>Large, simple fields. You can change these details later.</p></div><form onSubmit={onSubmit} className="onboarding-form"><fieldset><legend><span>1</span> Personal information</legend><div className="form-grid"><label className="span-two">Full name<input name="name" required defaultValue={profile?.name ?? authUser?.fullName ?? ''} placeholder="Your full name" /></label><label>Date of birth<input type="date" name="dateOfBirth" required defaultValue={profile?.dateOfBirth ?? ''} /></label><label>Gender (optional)<select name="gender" defaultValue={profile?.gender ?? ''}><option value="">Prefer not to say</option><option>Female</option><option>Male</option><option>Non-binary</option><option>Other</option></select></label><label>Personal phone<input name="phone" type="tel" required placeholder="Your phone number" defaultValue={profile?.phone ?? ''} /></label><label>Email (optional)<input name="email" type="email" defaultValue={profile?.email ?? authUser?.email ?? ''} /></label><label>Preferred Mitra language<select name="language" defaultValue={profile?.language ?? 'en'}><LanguageOptionList /></select></label><label>Profile type<select name="role" defaultValue={initialRole}><option value="elder">Elderly user</option><option value="caregiver">Caregiver</option></select></label></div></fieldset><fieldset><legend><span>2</span> SOS emergency contact</legend><p>This number will be used as your emergency contact and must be different from your personal phone.</p><div className="form-grid"><label>Contact name<input name="emergencyName" required defaultValue={profile?.emergencyName ?? ''} /></label><label>Emergency phone<input name="emergencyPhone" type="tel" required defaultValue={profile?.emergencyPhone ?? ''} /></label><label className="span-two">Relationship<select name="relationship" required defaultValue={profile?.emergencyRelationship ?? ''}><option value="" disabled>Choose relationship</option>{relationshipOptions.map((item) => <option key={item}>{item}</option>)}</select></label></div></fieldset><label className="consent-check"><input type="checkbox" required defaultChecked={Boolean(profile)} /><span>I understand that MindMitra supports cognitive engagement and daily activity. It is not a medical diagnostic or treatment device.</span></label><div className="form-actions"><button type="button" className="secondary-action" onClick={onBack}>Back</button><button className="primary-action" type="submit">{profile ? 'Save profile' : 'Create profile'} →</button></div></form></section></main>;
 }
 
 function Greeting({ name, language, onName, onListen, onContinue }: { name: string; language: Language; onName: (name: string) => void; onListen: (onResult: (value: string) => void) => void; onContinue: () => void }) {
   const [value, setValue] = useState(name);
-  const text = language === 'hi' ? { title: 'MindCare NER में आपका स्वागत है!', ask: 'आपका पूरा नाम क्या है?', meet: `आपसे मिलकर खुशी हुई, ${value}!`, go: 'मेरे होम पर जाएँ' } : language === 'as' ? { title: 'MindCare NER-লৈ স্বাগতম!', ask: 'আপোনাৰ সম্পূৰ্ণ নাম কি?', meet: `আপোনাক লগ পাই ভাল লাগিল, ${value}!`, go: 'মূল পৃষ্ঠালৈ যাওক' } : { title: 'Welcome to MindCare NER!', ask: 'What is your full name?', meet: `Nice to meet you, ${value}!`, go: 'Go to my home' };
+  const text = language === 'hi' ? { title: 'MindMitra में आपका स्वागत है!', ask: 'आपका पूरा नाम क्या है?', meet: `आपसे मिलकर खुशी हुई, ${value}!`, go: 'मेरे होम पर जाएँ' } : language === 'as' ? { title: 'MindMitra-লৈ স্বাগতম!', ask: 'আপোনাৰ সম্পূৰ্ণ নাম কি?', meet: `আপোনাক লগ পাই ভাল লাগিল, ${value}!`, go: 'মূল পৃষ্ঠালৈ যাওক' } : { title: 'Welcome to MindMitra!', ask: 'What is your full name?', meet: `Nice to meet you, ${value}!`, go: 'Go to my home' };
   return <main className="greeting-page"><section><span className="brand-mark">m</span><span className="section-kicker">A personal welcome</span><h1>{text.title}</h1><p>{text.ask}</p><div className="name-entry"><input value={value} onChange={(event) => setValue(event.target.value)} aria-label="Full name" /><button onClick={() => onListen((heard) => setValue(heard))} aria-label="Speak your name">🎤<small>Speak</small></button></div><div className="meet-message">♡ {text.meet}</div><button className="primary-action wide" onClick={() => { onName(value); onContinue(); }} disabled={!value.trim()}>{text.go} →</button></section></main>;
 }
 
@@ -570,8 +694,8 @@ function NavButton({ icon, label, active, onClick }: { icon: string; label: stri
   return <button className={`nav-button ${active ? 'active' : ''}`} onClick={onClick}><span>{icon}</span><small>{label}</small></button>;
 }
 
-function GameCard({ game, difficulty, favorite, mine, onPlay, onFavorite, onMine }: { game: GameDefinition; difficulty: string; favorite: boolean; mine: boolean; onPlay: () => void; onFavorite: () => void; onMine: () => void }) {
-  return <article className="game-card"><div className={`game-icon game-${game.category.toLowerCase()}`}>{game.icon}</div><div className="game-card-copy"><span>{game.category} · {difficulty}</span><h3>{game.name}</h3><p>{game.instruction}</p></div><div className="game-card-actions"><button className="play-game" onClick={onPlay}>Play →</button><button className={favorite ? 'marked' : ''} onClick={onFavorite} aria-label={favorite ? 'Remove favorite' : 'Add favorite'}>{favorite ? '★' : '☆'}</button><button className={mine ? 'marked' : ''} onClick={onMine} aria-label={mine ? 'Remove from My Games' : 'Add to My Games'}>{mine ? '✓' : '+'}</button></div></article>;
+function GameCard({ game, difficulty, progress, favorite, mine, onPlay, onFavorite, onMine }: { game: GameDefinition; difficulty: string; progress: GameProgress; favorite: boolean; mine: boolean; onPlay: () => void; onFavorite: () => void; onMine: () => void }) {
+  return <article className="game-card"><div className={`game-icon game-${game.category.toLowerCase()}`}>{game.icon}</div><div className="game-card-copy"><span>{game.category} · {difficulty}</span><h3>{game.name}</h3><p>{game.instruction}</p><div className="game-card-progress"><i><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></i><small>{progress.completedLevels.length}/10 levels</small></div></div><div className="game-card-actions"><button className="play-game" onClick={onPlay}>{progress.completedLevels.length === 10 ? 'Replay' : progress.inProgress || progress.currentLevel > 1 ? 'Continue' : 'Play'} →</button><button className={favorite ? 'marked' : ''} onClick={onFavorite} aria-label={favorite ? 'Remove favorite' : 'Add favorite'}>{favorite ? '★' : '☆'}</button><button className={mine ? 'marked' : ''} onClick={onMine} aria-label={mine ? 'Remove from My Games' : 'Add to My Games'}>{mine ? '✓' : '+'}</button></div></article>;
 }
 
 function FamilyPortrait({ member, large = false }: { member: FamilyMember; large?: boolean }) {
@@ -591,8 +715,10 @@ function EmptyState({ icon, title, text }: { icon: string; title: string; text: 
 }
 
 function SosModal({ profile, onClose }: { profile: AppData['profile']; onClose: () => void }) {
-  return <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="sos-title"><section className="sos-modal"><button className="modal-close" onClick={onClose} aria-label="Close">×</button><span className="sos-symbol">!</span><small>Emergency contact</small><h2 id="sos-title">{profile?.emergencyName}</h2><p>{profile?.emergencyRelationship}</p><strong>{profile?.emergencyPhone}</strong><a href={`tel:${profile?.emergencyPhone?.replace(/[^+\d]/g, '')}`}>📞 Call emergency contact</a><button className="secondary-action wide" onClick={onClose}>Cancel</button><em>MindCare does not provide emergency services. For immediate danger or a medical emergency, contact your local emergency service.</em></section></div>;
+  return <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="sos-title"><section className="sos-modal"><button className="modal-close" onClick={onClose} aria-label="Close">×</button><span className="sos-symbol">!</span><small>Emergency contact</small><h2 id="sos-title">{profile?.emergencyName}</h2><p>{profile?.emergencyRelationship}</p><strong>{profile?.emergencyPhone}</strong><a href={`tel:${profile?.emergencyPhone?.replace(/[^+\d]/g, '')}`}>📞 Call emergency contact</a><button className="secondary-action wide" onClick={onClose}>Cancel</button><em>MindMitra does not provide emergency services. For immediate danger or a medical emergency, contact your local emergency service.</em></section></div>;
 }
+
+function LanguageOptionList() { return <>{LANGUAGE_OPTIONS.map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}</>; }
 
 function initials(name: string) { return name.split(' ').filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || '?'; }
 function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }

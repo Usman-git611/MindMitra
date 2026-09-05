@@ -1,6 +1,7 @@
 import type { AppData, Profile } from './types';
 
-export const STORAGE_KEY = 'mindcare-ner-v1';
+export const STORAGE_KEY = 'mindmitra-v2';
+const LEGACY_STORAGE_KEY = 'mindcare-ner-v1';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -14,13 +15,17 @@ export const emptyData: AppData = {
   favorites: [],
   myGames: [],
   sessions: [],
+  gameProgress: {},
+  familyGameProgress: {},
+  conversations: [],
+  assistantContext: { updatedAt: new Date().toISOString() },
   caregiverConnected: false,
   updatedAt: new Date().toISOString(),
 };
 
 const demoProfile: Profile = {
   id: 'demo-maya', name: 'Maya Das', dateOfBirth: '1953-04-12', gender: 'Female', phone: '+91 98765 43210',
-  email: 'maya.demo@mindcare.local', language: 'en', role: 'elder', emergencyName: 'Raj Das', emergencyPhone: '+91 98765 40001',
+  email: 'maya.demo@mindmitra.local', language: 'en', role: 'elder', emergencyName: 'Raj Das', emergencyPhone: '+91 98765 40001',
   emergencyRelationship: 'Son', textSize: 'normal', highContrast: false, voice: true, sound: true, reducedMotion: false,
   sessionPreference: 15, caregiverCode: 'MAYA-2741',
 };
@@ -55,12 +60,25 @@ export const demoData: AppData = {
   updatedAt: new Date().toISOString(),
 };
 
+export function normalizeData(value: Partial<AppData> | null | undefined): AppData {
+  const profile = value?.profile?.email === 'maya.demo@mindcare.local' ? { ...value.profile, email: 'maya.demo@mindmitra.local' } : value?.profile ?? null;
+  return {
+    ...emptyData,
+    ...(value ?? {}),
+    profile,
+    gameProgress: value?.gameProgress ?? {},
+    familyGameProgress: value?.familyGameProgress ?? {},
+    conversations: value?.conversations ?? [],
+    assistantContext: value?.assistantContext ?? emptyData.assistantContext,
+  } as AppData;
+}
+
 export function loadLocalData(): AppData {
   if (typeof window === 'undefined') return emptyData;
   try {
-    const saved = window.localStorage.getItem(STORAGE_KEY);
+    const saved = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!saved) return emptyData;
-    return { ...emptyData, ...JSON.parse(saved) } as AppData;
+    return normalizeData(JSON.parse(saved) as Partial<AppData>);
   } catch {
     return emptyData;
   }
@@ -72,4 +90,5 @@ export function saveLocalData(data: AppData) {
 
 export function clearLocalData() {
   window.localStorage.removeItem(STORAGE_KEY);
+  window.localStorage.removeItem(LEGACY_STORAGE_KEY);
 }

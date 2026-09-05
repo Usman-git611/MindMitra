@@ -1,4 +1,4 @@
-export type Language = 'en' | 'hi' | 'as';
+export type Language = 'en' | 'hi' | 'bn' | 'ta' | 'te' | 'mr' | 'gu' | 'kn' | 'ml' | 'pa' | 'as';
 export type Role = 'elder' | 'caregiver';
 export type Category = 'Memory' | 'Attention' | 'Pattern' | 'Recognition' | 'Language' | 'Routine' | 'Emotion' | 'Cultural';
 export type Difficulty = 'Easy' | 'Medium' | 'Hard';
@@ -47,6 +47,45 @@ export interface GameResult {
   mistakes: number;
   date: string;
   sessionId?: string;
+  level?: number;
+  replay?: boolean;
+}
+
+export interface GameProgress {
+  gameId: number;
+  currentLevel: number;
+  unlockedLevel: number;
+  completedLevels: number[];
+  attempts: number;
+  replayCount: number;
+  inProgress?: { level: number; selectedAnswer?: string; startedAt: string; state?: { prompt: string; options: string[]; answer: string; memberId?: string } };
+  updatedAt: string;
+}
+
+export type FamilyGameType = 'who' | 'match' | 'remember';
+
+export interface FamilyGameProgress {
+  type: FamilyGameType;
+  currentLevel: number;
+  unlockedLevel: number;
+  completedLevels: number[];
+  attempts: number;
+  replayCount: number;
+  inProgress?: { level: number; selectedAnswer?: string; startedAt: string; state?: { prompt: string; options: string[]; answer: string; memberId?: string } };
+  updatedAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp: string;
+}
+
+export interface AssistantContext {
+  lastIntent?: string;
+  lastReply?: string;
+  updatedAt: string;
 }
 
 export interface Reminder {
@@ -100,6 +139,10 @@ export interface AppData {
   favorites: number[];
   myGames: number[];
   sessions: SessionSummary[];
+  gameProgress: Record<string, GameProgress>;
+  familyGameProgress: Record<string, FamilyGameProgress>;
+  conversations: ChatMessage[];
+  assistantContext: AssistantContext;
   caregiverConnected: boolean;
   updatedAt: string;
 }
@@ -110,8 +153,19 @@ export interface GameDefinition {
   category: Category;
   icon: string;
   instruction: string;
+  levels: GameLevel[];
+}
+
+export interface GameLevel {
+  level: number;
   prompt: string;
   options: string[];
   answer: string;
+  instruction?: string;
   memoryItems?: string[];
+}
+
+export interface PlayableGame extends Omit<GameDefinition, 'levels'>, GameLevel {
+  replay?: boolean;
+  familyType?: FamilyGameType;
 }

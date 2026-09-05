@@ -10,6 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "verify": "tsx scripts/verify-core.ts",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

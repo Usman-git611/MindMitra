@@ -1,5 +1,5 @@
-import MindCareApp from '../components/MindCareApp';
+import MindMitraApp from '../components/MindCareApp';
 
 export default function Home() {
-  return <MindCareApp />;
+  return <MindMitraApp />;
 }
