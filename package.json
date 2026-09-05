@@ -9,17 +9,25 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-mobile --ignore-pattern android --ignore-pattern native-android/build --ignore-pattern .android-sdk --ignore-pattern .gradle-cache --ignore-pattern .jdk --ignore-pattern releases --ignore-pattern .next",
     "verify": "tsx scripts/verify-core.ts",
+    "mobile:build": "vite build --config vite.mobile.config.ts",
+    "android:assets": "node scripts/generate-android-assets.mjs",
+    "android:sync": "npm run mobile:build && cap sync android",
+    "android:setup": "powershell -ExecutionPolicy Bypass -File scripts/setup-android-toolchain.ps1",
+    "android:apk": "powershell -ExecutionPolicy Bypass -File scripts/build-android-apk.ps1",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/core": "^8.5.1",
+    "drizzle-orm": "0.45.2",
     "next": "16.2.6",
     "react": "19.2.6",
-    "react-dom": "19.2.6",
-    "drizzle-orm": "0.45.2"
+    "react-dom": "19.2.6"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.1",
     "@cloudflare/vite-plugin": "1.37.1",
     "@cloudflare/workers-types": "4.20260515.1",
     "@openai/sites-vite-plugin": "^0.1.0 || ^0.2.0",
@@ -29,6 +37,7 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
+    "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
     "react-server-dom-webpack": "19.2.6",
@@ -36,8 +45,7 @@
     "typescript": "5.9.3",
     "vinext": "1.0.0-beta.3",
     "vite": "8.0.13",
-    "wrangler": "4.92.0",
-    "drizzle-kit": "0.31.10"
+    "wrangler": "4.92.0"
   },
   "type": "module"
 }

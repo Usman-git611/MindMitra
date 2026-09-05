@@ -36,3 +36,11 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+.android-sdk/
+.android-debug/
+.gradle-cache/
+.jdk/
+dist-mobile/
+native-android/build/
+releases/
+*.apk

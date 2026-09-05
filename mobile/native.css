@@ -1,0 +1,41 @@
+.capacitor-native {
+  background: #fbf7ec;
+}
+
+.capacitor-native body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  overscroll-behavior-y: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.capacitor-native input,
+.capacitor-native textarea,
+.capacitor-native [contenteditable='true'] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.capacitor-native .welcome-nav,
+.capacitor-native .onboarding-page > header {
+  height: calc(76px + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+}
+
+.capacitor-native .top-bar {
+  height: calc(64px + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+}
+
+.capacitor-native .bottom-nav {
+  bottom: max(9px, env(safe-area-inset-bottom));
+}
+
+.capacitor-native .app-content {
+  padding-bottom: calc(100px + env(safe-area-inset-bottom));
+}
+
+.capacitor-native .toast {
+  bottom: calc(92px + env(safe-area-inset-bottom));
+}

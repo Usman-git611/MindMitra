@@ -2,6 +2,7 @@
 /* eslint-disable react-hooks/set-state-in-effect, @next/next/no-img-element -- Client hydration restores local-first data; private family photos may be data URLs or authenticated object URLs. */
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { CATEGORY_INSTRUCTIONS, CATEGORIES, createBalancedSession, difficultyFor, GAME_LIBRARY, getPlayableGame } from '../lib/games';
 import { createFamilyGame, FAMILY_GAME_META } from '../lib/family-games';
 import { detectMitraIntent, LANGUAGE_LOCALES, LANGUAGE_OPTIONS, mitraReply } from '../lib/mitra';
@@ -25,6 +26,7 @@ const COPY = {
 };
 
 export default function MindMitraApp() {
+  const isNativeApp = Capacitor.isNativePlatform() || (typeof navigator !== 'undefined' && navigator.userAgent.includes('MindMitraAndroid'));
   const [data, setData] = useState<AppData>(emptyData);
   const [ready, setReady] = useState(false);
   const [screen, setScreen] = useState<Screen>('welcome');
@@ -67,14 +69,14 @@ export default function MindMitraApp() {
     }
     setOnline(navigator.onLine);
     setReady(true);
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+    if (!isNativeApp && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => undefined);
 
     const goOnline = () => setOnline(true);
     const goOffline = () => { setOnline(false); setSyncStatus('local'); notify('You’re offline. Your progress is saved and will sync later.'); };
     window.addEventListener('online', goOnline);
     window.addEventListener('offline', goOffline);
 
-    fetch('/api/auth/me').then((response) => response.json()).then(async (payload) => {
+    if (!isNativeApp) fetch('/api/auth/me').then((response) => response.json()).then(async (payload) => {
       const { user } = payload as { user: AuthUser | null };
       setAuthUser(user);
       if (!user) return;
@@ -93,7 +95,7 @@ export default function MindMitraApp() {
       window.removeEventListener('online', goOnline);
       window.removeEventListener('offline', goOffline);
     };
-  }, []);
+  }, [isNativeApp]);
 
   useEffect(() => {
     if (!ready) return;
@@ -418,7 +420,7 @@ export default function MindMitraApp() {
 
   if (!ready) return <main className="app-loading" aria-live="polite">Preparing MindMitra…</main>;
   if (screen === 'onboarding') return <Onboarding authUser={authUser} profile={data.profile} initialRole={data.profile?.role ?? 'elder'} onSubmit={completeOnboarding} onBack={() => setScreen('welcome')} />;
-  if (screen === 'welcome' || !data.profile) return <Welcome authUser={authUser} profileName={data.profile?.name ?? ''} language={language} onContinue={() => setScreen(data.profile?.role === 'caregiver' ? 'caregiver' : 'home')} onDemo={startDemo} onCreate={() => beginOnboarding('elder')} onCaregiver={() => beginOnboarding('caregiver')} />;
+  if (screen === 'welcome' || !data.profile) return <Welcome authUser={authUser} nativeApp={isNativeApp} profileName={data.profile?.name ?? ''} language={language} onContinue={() => setScreen(data.profile?.role === 'caregiver' ? 'caregiver' : 'home')} onDemo={startDemo} onCreate={() => beginOnboarding('elder')} onCaregiver={() => beginOnboarding('caregiver')} />;
   if (screen === 'greeting') return <Greeting name={data.profile.name} language={language} onName={(name) => updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, name } }) : current)} onListen={listen} onContinue={() => go('home')} />;
 
   const page = (() => {
@@ -455,7 +457,7 @@ export default function MindMitraApp() {
       <div className="app-column">
         <header className="top-bar">
           <button className="mobile-brand brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></button>
-          <div className={`connection ${online ? '' : 'is-offline'}`}><i />{!online ? t.offline : syncStatus === 'syncing' ? t.syncing : syncStatus === 'synced' ? t.synced : t.online}</div>
+          <div className={`connection ${online && !isNativeApp ? '' : 'is-offline'}`}><i />{isNativeApp ? 'Saved on this phone' : !online ? t.offline : syncStatus === 'syncing' ? t.syncing : syncStatus === 'synced' ? t.synced : t.online}</div>
           <button className="mitra-quick" onClick={() => go('assistant')}><span>◉</span>{t.assistant}</button>
           <button className="sos-quick" onClick={() => setShowSos(true)}>! <span>{t.sos}</span></button>
         </header>
@@ -662,7 +664,7 @@ interface SpeechRecognitionLike {
   start: () => void;
 }
 
-function Welcome({ authUser, profileName, language, onContinue, onDemo, onCreate, onCaregiver }: { authUser: AuthUser | null; profileName: string; language: Language; onContinue: () => void; onDemo: () => void; onCreate: () => void; onCaregiver: () => void }) {
+function Welcome({ authUser, nativeApp, profileName, language, onContinue, onDemo, onCreate, onCaregiver }: { authUser: AuthUser | null; nativeApp: boolean; profileName: string; language: Language; onContinue: () => void; onDemo: () => void; onCreate: () => void; onCaregiver: () => void }) {
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(language);
   const welcomeCopy = {
     en: { eyebrow: 'A calmer day, one small step at a time', title: 'Welcome to MindMitra', intro: 'A simple way to keep your mind active, remember your daily routine, and stay connected.', signIn: profileName ? `Continue as ${profileName}` : authUser ? `Continue as ${authUser.displayName}` : 'Sign in securely', create: 'Create on this device', demo: 'Try demo account', note: 'Cognitive engagement and daily support — never a medical diagnosis.' },
@@ -671,7 +673,7 @@ function Welcome({ authUser, profileName, language, onContinue, onDemo, onCreate
   };
   const copy = welcomeCopy[selectedLanguage as keyof typeof welcomeCopy] ?? welcomeCopy.en;
   return <main className="welcome-page"><nav className="welcome-nav"><span className="brand"><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></span><label className="language-picker"><span className="sr-only">Choose language</span><select value={selectedLanguage} onChange={(event) => setSelectedLanguage(event.target.value as Language)}><LanguageOptionList /></select></label></nav>
-    <section className="welcome-hero"><div className="hero-copy"><span className="eyebrow"><i />{copy.eyebrow}</span><h1>{copy.title}</h1><p className="hero-intro">{copy.intro}</p><div className="welcome-actions">{profileName ? <button className="button button-primary" onClick={onContinue}>{copy.signIn}<span>→</span></button> : authUser ? <button className="button button-primary" onClick={onCreate}>{copy.signIn}<span>→</span></button> : <a className="button button-primary" href="/signin-with-chatgpt?return_to=%2F">{copy.signIn}<span>→</span></a>}<button className="button button-secondary" onClick={onCreate}>{copy.create}</button><button className="button button-quiet" onClick={onDemo}>{copy.demo}<span>↗</span></button></div><button className="caregiver-entry" onClick={onCaregiver}>I’m a caregiver <span>→</span></button><p className="trust-note"><span>✓</span>{copy.note}</p></div>
+    <section className="welcome-hero"><div className="hero-copy"><span className="eyebrow"><i />{copy.eyebrow}</span><h1>{copy.title}</h1><p className="hero-intro">{copy.intro}</p><div className="welcome-actions">{profileName ? <button className="button button-primary" onClick={onContinue}>{copy.signIn}<span>→</span></button> : authUser || nativeApp ? <button className="button button-primary" onClick={onCreate}>{nativeApp ? copy.create : copy.signIn}<span>→</span></button> : <a className="button button-primary" href="/signin-with-chatgpt?return_to=%2F">{copy.signIn}<span>→</span></a>}{!nativeApp && <button className="button button-secondary" onClick={onCreate}>{copy.create}</button>}<button className="button button-quiet" onClick={onDemo}>{copy.demo}<span>↗</span></button></div><button className="caregiver-entry" onClick={onCaregiver}>I’m a caregiver <span>→</span></button><p className="trust-note"><span>✓</span>{copy.note}</p></div>
       <div className="hero-art" aria-label="A gentle illustration representing care, memory, and daily wellbeing"><div className="sun" /><div className="cloud cloud-one" /><div className="cloud cloud-two" /><div className="hill hill-back" /><div className="hill hill-front" /><div className="care-card"><div className="portrait"><span>👵🏽</span></div><div><p>Good morning, Maya</p><small>You have 2 gentle activities today.</small></div></div><div className="floating-pill pill-memory"><span>✦</span><b>Mind active</b></div><div className="floating-pill pill-routine"><span>✓</span><b>Routine ready</b></div></div></section>
     <section className="welcome-benefits"><article><span>✦</span><div><h2>Gentle brain games</h2><p>40 short activities that adapt to you.</p></div></article><article><span>☀</span><div><h2>Daily support</h2><p>Friendly reminders for routines, water, and medicine.</p></div></article><article><span>⌂</span><div><h2>Family connection</h2><p>Meaningful games made from your own memories.</p></div></article></section></main>;
 }
