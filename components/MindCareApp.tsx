@@ -2,7 +2,6 @@
 /* eslint-disable react-hooks/set-state-in-effect, @next/next/no-img-element -- Client hydration restores local-first data; private family photos may be data URLs or authenticated object URLs. */
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { Capacitor } from '@capacitor/core';
 import { CATEGORY_INSTRUCTIONS, CATEGORIES, createBalancedSession, difficultyFor, GAME_LIBRARY, getPlayableGame } from '../lib/games';
 import { createFamilyGame, FAMILY_GAME_META } from '../lib/family-games';
 import { detectMitraIntent, LANGUAGE_LOCALES, LANGUAGE_OPTIONS, mitraReply } from '../lib/mitra';
@@ -18,6 +17,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 const relationshipOptions = ['Son', 'Daughter', 'Spouse', 'Brother', 'Sister', 'Caregiver', 'Friend', 'Other'];
 const newGameProgress = (gameId: number): GameProgress => ({ gameId, currentLevel: 1, unlockedLevel: 1, completedLevels: [], attempts: 0, replayCount: 0, updatedAt: new Date().toISOString() });
 const newFamilyProgress = (type: FamilyGameType): FamilyGameProgress => ({ type, currentLevel: 1, unlockedLevel: 1, completedLevels: [], attempts: 0, replayCount: 0, updatedAt: new Date().toISOString() });
+const isMindMitraNative = () => typeof navigator !== 'undefined' && navigator.userAgent.includes('MindMitraAndroid');
 
 const COPY = {
   en: { home: 'Home', games: 'Games', family: 'Family', progress: 'Progress', settings: 'Settings', greeting: 'Good morning', today: 'Today', activities: 'activities', reminder: 'reminder', back: 'Back', save: 'Save', cancel: 'Cancel', start: 'Start', done: 'Done', next: 'Next', allGames: 'All games', recommended: 'Recommended for you', online: 'Online · saved', offline: 'Offline · saved here', syncing: 'Saving…', synced: 'Everything saved', assistant: 'Talk to Mitra', sos: 'SOS' },
@@ -26,7 +26,7 @@ const COPY = {
 };
 
 export default function MindMitraApp() {
-  const isNativeApp = Capacitor.isNativePlatform() || (typeof navigator !== 'undefined' && navigator.userAgent.includes('MindMitraAndroid'));
+  const isNativeApp = isMindMitraNative();
   const [data, setData] = useState<AppData>(emptyData);
   const [ready, setReady] = useState(false);
   const [screen, setScreen] = useState<Screen>('welcome');

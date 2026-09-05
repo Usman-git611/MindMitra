@@ -46,6 +46,9 @@ export default defineConfig(async () => {
 
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
+    // Keep Vinext's dependency discovery on the web app. The standalone
+    // mobile/index.html is built separately by vite.mobile.config.ts.
+    optimizeDeps: { entries: ['app/**/*.{js,jsx,ts,tsx}'] },
     server: {
       host: '0.0.0.0',
       allowedHosts: ['.ngrok-free.dev'],

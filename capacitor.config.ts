@@ -4,6 +4,7 @@ const config: CapacitorConfig = {
   appId: 'com.mindmitra.app',
   appName: 'MindMitra',
   webDir: 'dist-mobile',
+  appendUserAgent: 'MindMitraAndroid/1.0',
   android: {
     allowMixedContent: false,
     backgroundColor: '#fbf7ec',
