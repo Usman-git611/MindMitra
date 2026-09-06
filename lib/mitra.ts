@@ -4,9 +4,7 @@ export type MitraIntent = 'greeting' | 'wellbeing' | 'game' | 'session' | 'water
 
 export const LANGUAGE_OPTIONS: Array<{ value: Language; label: string }> = [
   { value: 'en', label: 'English' }, { value: 'hi', label: 'हिन्दी' }, { value: 'bn', label: 'বাংলা' },
-  { value: 'ta', label: 'தமிழ்' }, { value: 'te', label: 'తెలుగు' }, { value: 'mr', label: 'मराठी' },
-  { value: 'gu', label: 'ગુજરાતી' }, { value: 'kn', label: 'ಕನ್ನಡ' }, { value: 'ml', label: 'മലയാളം' },
-  { value: 'pa', label: 'ਪੰਜਾਬੀ' }, { value: 'as', label: 'অসমীয়া' },
+  { value: 'as', label: 'অসমীয়া' },
 ];
 
 export const LANGUAGE_LOCALES: Record<Language, string> = {

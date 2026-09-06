@@ -8,7 +8,7 @@ const cache = new Map<Language, TranslationDictionary>([['en', {}]]);
 export async function loadLanguagePack(language: Language): Promise<TranslationDictionary> {
   const cached = cache.get(language);
   if (cached) return cached;
-  const response = await fetch(`/locales/${language}.json`, { cache: 'force-cache' });
+  const response = await fetch(`/locales/${language}.json`, { cache: 'no-cache' });
   if (!response.ok) throw new Error(`Language pack ${language} could not be loaded.`);
   const pack = await response.json() as TranslationDictionary;
   cache.set(language, pack);
@@ -24,6 +24,7 @@ export function translateText(dictionary: TranslationDictionary, source: string,
 // verified without coupling the game engine to a particular language.
 export const UI_STRINGS = [
   'Home', 'Games', 'Family', 'Progress', 'Settings', 'Mitra', 'Back', 'Save', 'Cancel', 'Start', 'Done', 'Next', 'All games',
+  'Main navigation', 'Mobile navigation', 'MindMitra reminder',
   'Recommended for you', 'Online · saved', 'Offline · saved here', 'Saving…', 'Everything saved', 'Saved on this phone', 'Talk to Mitra', 'SOS',
   'Choose language', 'Language', 'Dismiss', 'Level {level} of 10', '{current} of {total}', '{count}/10 levels', '{count} of 10 completed',
   'Completed {count} time', 'Completed {count} times', 'Play', 'Continue', 'Replay', 'Save & Exit', 'Finish', 'Try again', 'Check my answer',
@@ -45,6 +46,7 @@ export const UI_STRINGS = [
   'Personal memories', 'Add people who matter to you. Photos stay private and are used only to create your personal memory activities.',
   'Play family game', 'Your circle', '{count} family members', 'Add your first family memory', 'A name, relationship, and optional photo are enough to begin.',
   'Add someone', 'Create a family profile', 'Full name', 'Relationship', 'Choose', 'Nickname (optional)', 'Photo (optional)',
+  'e.g. Raj Das', 'e.g. Raju',
   'Take a photo or choose one from your phone. Maximum 5 MB.', 'Add to My Family', 'Who Is This?', 'Match Name to Face', 'Remember the Family',
   'Recognize a person and recall their relationship.', 'Match a saved family photo with the right name.', 'Recall names, nicknames, and relationships.',
   'Which name is saved as your {relationship}?', 'Who in your saved circle is your {relationship}?', 'Choose the saved name for your {relationship}.',
@@ -53,10 +55,12 @@ export const UI_STRINGS = [
   'Upcoming appointments', 'Keep doctor visits, times, locations, and notes together.', 'Your medicines', 'Nothing added yet',
   'Use the form to create your first reminder.', 'New medicine', 'New appointment', 'Add a reminder', 'Medicine name', 'Doctor name',
   'Date', 'Time', 'Dosage description', 'Frequency', 'Start date', 'End date', 'Location', 'Notes', 'Save reminder',
+  'e.g. 1 tablet', 'Appointment',
   'A gentle nudge to drink water during your waking hours.', 'of {target} glasses', 'Target reached — well done!', 'It is time to drink some water.',
   'I drank a glass', 'Remind me later', 'Your plan', 'Hydration settings', 'Reminder interval', 'Wake time', 'Sleep time', 'Daily target', 'Save plan',
   'Today’s timeline', 'A clear, reassuring plan for the day. Tap an activity when it is complete.', 'Your day is open',
   'Add the first activity using the form.', 'New activity', 'Add to today', 'Activity', 'Add activity',
+  'e.g. Morning walk',
   'Cognitive activity', 'Your Progress', 'These scores show game practice only. They are not medical measurements or a diagnosis.',
   'Games today', 'This week', 'Average accuracy', 'Sessions', 'By activity category', 'Game performance', 'Recent activity', 'New',
   'Your progress starts with one game', 'Complete a gentle activity and your result will appear here.',
@@ -106,4 +110,7 @@ export const UI_STRINGS = [
   '{name} was added to My Family.', 'Reminder saved.', 'Notifications are unavailable. You can still view reminders inside the app.',
   'Notifications enabled.', 'Notifications are disabled. You can still view reminders inside the app.',
   'Delete your profile, family records, reminders, and game history from this device and synced account?',
+  'not currently scheduled', 'complete for today', '{count} sec',
+  'Blood pressure medicine', '1 tablet', 'Drink a glass of water', 'City Clinic',
+  'Wake up and freshen up', 'Breakfast', 'Morning walk', 'Lunch', 'Family time',
 ] as const;

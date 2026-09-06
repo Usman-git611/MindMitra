@@ -1,8 +1,7 @@
-const CACHE_NAME = 'mindmitra-v3';
+const CACHE_NAME = 'mindmitra-v4';
 const APP_SHELL = [
   '/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png',
-  '/locales/hi.json', '/locales/bn.json', '/locales/ta.json', '/locales/te.json', '/locales/mr.json',
-  '/locales/gu.json', '/locales/kn.json', '/locales/ml.json', '/locales/pa.json', '/locales/as.json',
+  '/locales/hi.json', '/locales/bn.json', '/locales/as.json',
 ];
 
 self.addEventListener('install', (event) => {

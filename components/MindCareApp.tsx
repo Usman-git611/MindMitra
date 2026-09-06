@@ -173,20 +173,23 @@ export default function MindMitraApp() {
       const due = data.reminders.find((item) => item.status === 'pending' && item.time === time && (!item.date || item.date === today()));
       if (!due) return;
       setNotificationMessage(due.title);
-      if ('Notification' in window && Notification.permission === 'granted') new Notification('MindMitra reminder', { body: due.title, icon: '/icon-192.png' });
+      if ('Notification' in window && Notification.permission === 'granted') new Notification(tx('MindMitra reminder'), { body: tx(due.title), icon: '/icon-192.png' });
     };
     checkReminders();
     const timer = window.setInterval(checkReminders, 30000);
     return () => window.clearInterval(timer);
-  }, [data.reminders, ready]);
+  }, [data.reminders, ready, tx]);
 
   const updateData = (updater: (current: AppData) => AppData) => setData((current) => ({ ...updater(current), updatedAt: new Date().toISOString() }));
   const go = (next: Screen) => { setScreen(next); window.scrollTo({ top: 0, behavior: data.profile?.reducedMotion ? 'auto' : 'smooth' }); };
 
-  const startDemo = () => {
-    setData(structuredClone(demoData));
+  const startDemo = (preferredLanguage: Language) => {
+    const localizedDemo = structuredClone(demoData);
+    if (localizedDemo.profile) localizedDemo.profile.language = preferredLanguage;
+    window.localStorage.setItem('mindmitra-preferred-language', preferredLanguage);
+    setData(localizedDemo);
     setScreen('home');
-    notify(tx('Demo account opened. Changes stay separate on this device.'));
+    void loadLanguagePack(preferredLanguage).then((pack) => notify(translateText(pack, 'Demo account opened. Changes stay separate on this device.')));
   };
 
   const beginOnboarding = (role: 'elder' | 'caregiver' = 'elder', preferredLanguage: Language = language) => {
@@ -214,6 +217,7 @@ export default function MindMitraApp() {
       textSize: previous?.textSize ?? 'normal' as const, highContrast: previous?.highContrast ?? false, voice: previous?.voice ?? true, sound: previous?.sound ?? true, reducedMotion: previous?.reducedMotion ?? false, sessionPreference: previous?.sessionPreference ?? 15,
       caregiverCode: previous?.caregiverCode ?? `${name.split(' ')[0].toUpperCase().slice(0, 5)}-${Math.floor(1000 + Math.random() * 9000)}`,
     };
+    window.localStorage.setItem('mindmitra-preferred-language', profile.language);
     updateData((current) => ({ ...current, profile }));
     setScreen(role === 'caregiver' ? 'caregiver' : 'greeting');
   };
@@ -490,7 +494,7 @@ export default function MindMitraApp() {
     formElement.reset();
   };
 
-  const runAssistant = (value = assistantInput) => {
+  const runAssistant = (value = assistantInput, displayedValue = value) => {
     const command = value.trim();
     if (!command) return;
     const intent = detectMitraIntent(command, data.assistantContext.lastIntent);
@@ -506,8 +510,8 @@ export default function MindMitraApp() {
       const reminder: Reminder = { id: uid('hydration'), type: 'hydration', title: 'Drink a glass of water', time: new Date(Date.now() + 30 * 60000).toTimeString().slice(0, 5), status: 'pending', createdAt: new Date().toISOString() };
       updateData((current) => ({ ...current, reminders: [...current.reminders, reminder] })); reply = mitraReply(language, intent);
     }
-    else if (intent === 'medicine') { const medicine = data.reminders.find((item) => item.type === 'medicine' && item.status === 'pending'); reply = mitraReply(language, intent, { detail: medicine ? `${medicine.title} · ${medicine.time}` : 'not currently scheduled' }); go('medicines'); }
-    else if (intent === 'routine') { const next = data.routine.find((item) => !item.done); reply = mitraReply(language, intent, { detail: next ? `${next.activity} · ${next.time}` : 'complete for today' }); go('routine'); }
+    else if (intent === 'medicine') { const medicine = data.reminders.find((item) => item.type === 'medicine' && item.status === 'pending'); reply = mitraReply(language, intent, { detail: medicine ? `${tx(medicine.title)} · ${medicine.time}` : tx('not currently scheduled') }); go('medicines'); }
+    else if (intent === 'routine') { const next = data.routine.find((item) => !item.done); reply = mitraReply(language, intent, { detail: next ? `${tx(next.activity)} · ${next.time}` : tx('complete for today') }); go('routine'); }
     else if (intent === 'progress') { const average = data.results.length ? Math.round(data.results.reduce((sum, item) => sum + item.accuracy, 0) / data.results.length) : 0; reply = mitraReply(language, intent, { count: data.results.length, accuracy: average }); go('progress'); }
     else if (intent === 'sos') { reply = mitraReply(language, intent); setShowSos(true); }
     else if (intent === 'family') { reply = mitraReply(language, intent, { count: data.family.length }); go('family'); }
@@ -519,7 +523,7 @@ export default function MindMitraApp() {
     const now = new Date().toISOString();
     updateData((current) => ({
       ...current,
-      conversations: [...current.conversations, { id: uid('message'), role: 'user' as const, text: command, timestamp: now }, { id: uid('message'), role: 'assistant' as const, text: reply, timestamp: now }].slice(-60),
+      conversations: [...current.conversations, { id: uid('message'), role: 'user' as const, text: displayedValue, timestamp: now }, { id: uid('message'), role: 'assistant' as const, text: reply, timestamp: now }].slice(-60),
       assistantContext: { lastIntent: intent, lastReply: reply, updatedAt: now },
     }));
     setAssistantReply(reply);
@@ -527,7 +531,7 @@ export default function MindMitraApp() {
     if (intent !== 'repeat') speak(reply);
   };
 
-  if (!ready) return <main className="app-loading" aria-live="polite">Preparing MindMitra…</main>;
+  if (!ready) return <main className="app-loading" aria-live="polite">{tx('Preparing MindMitra…')}</main>;
   if (screen === 'onboarding') return <Onboarding authUser={authUser} profile={data.profile} initialRole={data.profile?.role ?? 'elder'} initialLanguage={data.profile?.language ?? setupLanguage} onSubmit={completeOnboarding} onBack={() => setScreen('welcome')} />;
   if (screen === 'welcome' || !data.profile) return <Welcome authUser={authUser} nativeApp={isNativeApp} profileName={data.profile?.name ?? ''} language={language} onContinue={() => setScreen(data.profile?.role === 'caregiver' ? 'caregiver' : 'home')} onDemo={startDemo} onCreate={(preferredLanguage) => beginOnboarding('elder', preferredLanguage)} onCaregiver={(preferredLanguage) => beginOnboarding('caregiver', preferredLanguage)} />;
   if (screen === 'greeting') return <Greeting name={data.profile.name} language={language} onName={(name) => updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, name } }) : current)} onListen={listen} onContinue={() => go('home')} />;
@@ -553,7 +557,7 @@ export default function MindMitraApp() {
 
   return (
     <div className={`mindcare-app text-${data.profile.textSize} ${data.profile.highContrast ? 'high-contrast' : ''} ${data.profile.reducedMotion ? 'reduced-motion' : ''}`}>
-      <aside className="side-nav" aria-label="Main navigation">
+      <aside className="side-nav" aria-label={tx('Main navigation')}>
         <button className="brand app-brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></button>
         <NavButton icon="⌂" label={tx('Home')} active={screen === 'home'} onClick={() => go('home')} />
         <NavButton icon="✦" label={tx('Games')} active={['games', 'game-detail', 'session', 'game'].includes(screen)} onClick={() => go('games')} />
@@ -571,9 +575,9 @@ export default function MindMitraApp() {
           <button className="mitra-quick" onClick={() => go('assistant')}><span>◉</span>{tx('Talk to Mitra')}</button>
           <button className="sos-quick" onClick={() => setShowSos(true)}>! <span>{tx('SOS')}</span></button>
         </header>
-        {notificationMessage && <div className="due-banner" role="alert"><span>🔔</span><b>{notificationMessage}</b><button onClick={() => setNotificationMessage('')}>{tx('Dismiss')}</button></div>}
+        {notificationMessage && <div className="due-banner" role="alert"><span>🔔</span><b>{tx(notificationMessage)}</b><button onClick={() => setNotificationMessage('')}>{tx('Dismiss')}</button></div>}
         <main className="app-content">{page}</main>
-        <nav className="bottom-nav" aria-label="Mobile navigation">
+        <nav className="bottom-nav" aria-label={tx('Mobile navigation')}>
           <NavButton icon="⌂" label={tx('Home')} active={screen === 'home'} onClick={() => go('home')} />
           <NavButton icon="✦" label={tx('Games')} active={['games', 'game-detail', 'session', 'game'].includes(screen)} onClick={() => go('games')} />
           <NavButton icon="♡" label={tx('Family')} active={screen === 'family'} onClick={() => go('family')} />
@@ -592,7 +596,7 @@ export default function MindMitraApp() {
     const cards: { icon: string; title: string; subtitle: string; screen: Screen; tone: string }[] = [
       { icon: '✦', title: tx('Play Games'), subtitle: tx('Gentle activities for your mind'), screen: 'games', tone: 'green' },
       { icon: '◷', title: tx('Start Session'), subtitle: tx('{minutes} minutes · balanced practice', { minutes: data.profile?.sessionPreference ?? 15 }), screen: 'session', tone: 'peach' },
-      { icon: '☀', title: tx('My Routine'), subtitle: nextRoutine ? tx('Next: {activity}', { activity: nextRoutine.activity }) : tx('All done for today'), screen: 'routine', tone: 'yellow' },
+      { icon: '☀', title: tx('My Routine'), subtitle: nextRoutine ? tx('Next: {activity}', { activity: tx(nextRoutine.activity) }) : tx('All done for today'), screen: 'routine', tone: 'yellow' },
       { icon: '✚', title: tx('Medicines'), subtitle: tx('{count} pending today', { count: pending.filter((item) => item.type === 'medicine').length }), screen: 'medicines', tone: 'blue' },
       { icon: '💧', title: tx('Hydration'), subtitle: tx('{current} of {target} glasses', { current: data.hydration.glasses, target: data.hydration.target }), screen: 'hydration', tone: 'aqua' },
       { icon: '▣', title: tx('Appointments'), subtitle: tx('{count} coming up', { count: pending.filter((item) => item.type === 'appointment').length }), screen: 'appointments', tone: 'lavender' },
@@ -605,9 +609,9 @@ export default function MindMitraApp() {
         <button className="session-cta" onClick={() => startSession(data.profile?.sessionPreference ?? 15)}><span>✦</span><div><small>{tx('Recommended')}</small><b>{tx('Start a gentle session')}</b></div><i>→</i></button>
       </section>
       <section className="today-strip">
-        <div className="today-strip-title"><span>☀</span><div><small>{tx('Coming up')}</small><b>{nextRoutine ? `${nextRoutine.time} · ${nextRoutine.activity}` : tx('Your routine is complete')}</b></div></div>
+        <div className="today-strip-title"><span>☀</span><div><small>{tx('Coming up')}</small><b>{nextRoutine ? `${nextRoutine.time} · ${tx(nextRoutine.activity)}` : tx('Your routine is complete')}</b></div></div>
         <div className="today-divider" />
-        <div className="today-strip-title"><span>🔔</span><div><small>{tx('Next reminder')}</small><b>{pending[0] ? `${pending[0].time} · ${pending[0].title}` : tx('Nothing pending')}</b></div></div>
+        <div className="today-strip-title"><span>🔔</span><div><small>{tx('Next reminder')}</small><b>{pending[0] ? `${pending[0].time} · ${tx(pending[0].title)}` : tx('Nothing pending')}</b></div></div>
         <button onClick={() => go('routine')}>{tx('View today')} →</button>
       </section>
       <div className="section-heading"><div><span className="section-kicker">{tx('Everything in one place')}</span><h2>{tx('How can we help today?')}</h2></div><button onClick={() => go('caregiver')}>{tx('Caregiver view')} <span>→</span></button></div>
@@ -678,7 +682,7 @@ export default function MindMitraApp() {
     const whoFinished = whoProgress.completedLevels.length === 10 && !whoProgress.inProgress;
     return <><PageHeader kicker={tx('Personal memories')} title={tx('My Family')} text={tx('Add people who matter to you. Photos stay private and are used only to create your personal memory activities.')} backLabel={tx('Back')} onBack={() => go('home')} action={<button className="primary-action" onClick={() => whoFinished ? beginFamilyReplay('who') : startFamilyGame('who')}>♡ {tx('Play family game')}</button>} />
       <div className="family-layout"><section className="family-list card-panel"><div className="panel-title"><div><span className="section-kicker">{tx('Your circle')}</span><h2>{tx('{count} family members', { count: data.family.length })}</h2></div></div>{data.family.length ? <div className="family-grid">{data.family.map((member) => <article key={member.id}><FamilyPortrait member={member} /><div><h3>{member.name}</h3><p>{tx(member.relationship)}{member.nickname ? ` · “${member.nickname}”` : ''}</p></div><button aria-label={`${tx('Remove')} ${member.name}`} onClick={() => void removeFamilyMember(member)}>×</button></article>)}</div> : <EmptyState icon="♡" title={tx('Add your first family memory')} text={tx('A name, relationship, and optional photo are enough to begin.')} />}</section>
-      <section className="card-panel form-panel"><span className="section-kicker">{tx('Add someone')}</span><h2>{tx('Create a family profile')}</h2><form onSubmit={addFamilyMember} className="stack-form"><label>{tx('Full name')}<input name="name" required placeholder="e.g. Raj Das" /></label><div className="two-fields"><label>{tx('Relationship')}<select name="relationship" required defaultValue=""><option value="" disabled>{tx('Choose')}</option>{relationshipOptions.map((item) => <option key={item} value={item}>{tx(item)}</option>)}</select></label><label>{tx('Nickname (optional)')}<input name="nickname" placeholder="e.g. Raju" /></label></div><label className="upload-field">{tx('Photo (optional)')}<input type="file" name="photo" accept="image/*" capture="user" /><small>{tx('Take a photo or choose one from your phone. Maximum 5 MB.')}</small></label><button className="primary-action wide" type="submit">{tx('Add to My Family')}</button></form></section></div>
+      <section className="card-panel form-panel"><span className="section-kicker">{tx('Add someone')}</span><h2>{tx('Create a family profile')}</h2><form onSubmit={addFamilyMember} className="stack-form"><label>{tx('Full name')}<input name="name" required placeholder={tx('e.g. Raj Das')} /></label><div className="two-fields"><label>{tx('Relationship')}<select name="relationship" required defaultValue=""><option value="" disabled>{tx('Choose')}</option>{relationshipOptions.map((item) => <option key={item} value={item}>{tx(item)}</option>)}</select></label><label>{tx('Nickname (optional)')}<input name="nickname" placeholder={tx('e.g. Raju')} /></label></div><label className="upload-field">{tx('Photo (optional)')}<input type="file" name="photo" accept="image/*" capture="user" /><small>{tx('Take a photo or choose one from your phone. Maximum 5 MB.')}</small></label><button className="primary-action wide" type="submit">{tx('Add to My Family')}</button></form></section></div>
       <section className="memory-modes">{(Object.keys(FAMILY_GAME_META) as FamilyGameType[]).map((type) => { const meta = FAMILY_GAME_META[type]; const progress = familyProgressFor(type); const finished = progress.completedLevels.length === 10 && !progress.inProgress; return <article key={type}><span>{meta.icon}</span><h3>{tx(meta.name)}</h3><p>{tx(meta.description)}</p><div className="mini-level-track"><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></div><small>{tx('{count}/10 levels', { count: progress.completedLevels.length })} · {progress.completionCount === 1 ? tx('Completed {count} time', { count: progress.completionCount }) : tx('Completed {count} times', { count: progress.completionCount })}</small><button onClick={() => finished ? beginFamilyReplay(type) : startFamilyGame(type)}>{finished ? tx('Replay') : progress.inProgress ? tx('Continue') : tx('Play')} →</button></article>; })}</section>
     </>;
   }
@@ -688,7 +692,7 @@ export default function MindMitraApp() {
     const items = data.reminders.filter((item) => item.type === type);
     return <><PageHeader kicker={tx('Daily support')} title={tx(isMedicine ? 'Medicine reminders' : 'Appointments')} text={tx(isMedicine ? 'Record reminders only for medicines already prescribed to you. MindMitra does not recommend medication.' : 'Keep doctor visits, times, locations, and notes together.')} backLabel={tx('Back')} onBack={() => go('home')} />
       <div className="two-column"><section className="card-panel"><div className="panel-title"><h2>{tx(isMedicine ? 'Your medicines' : 'Upcoming appointments')}</h2></div>{items.length ? <div className="reminder-list">{items.map((item) => <ReminderRow key={item.id} item={item} tx={tx} onStatus={setReminderStatus} />)}</div> : <EmptyState icon={isMedicine ? '✚' : '▣'} title={tx('Nothing added yet')} text={tx('Use the form to create your first reminder.')} />}</section>
-      <section className="card-panel form-panel"><span className="section-kicker">{tx(isMedicine ? 'New medicine' : 'New appointment')}</span><h2>{tx('Add a reminder')}</h2><form className="stack-form" onSubmit={(event) => addReminder(event, type)}><label>{tx(isMedicine ? 'Medicine name' : 'Doctor name')}<input name="title" required /></label><div className="two-fields"><label>{tx('Date')}<input type="date" name="date" required={!isMedicine} /></label><label>{tx('Time')}<input type="time" name="time" required /></label></div>{isMedicine ? <><div className="two-fields"><label>{tx('Dosage description')}<input name="dosage" placeholder="e.g. 1 tablet" /></label><label>{tx('Frequency')}<select name="frequency"><option value="Daily">{tx('Daily')}</option><option value="Twice daily">{tx('Twice daily')}</option><option value="Weekly">{tx('Weekly')}</option><option value="As prescribed">{tx('As prescribed')}</option></select></label></div><div className="two-fields"><label>{tx('Start date')}<input type="date" name="startDate" /></label><label>{tx('End date')}<input type="date" name="endDate" /></label></div></> : <label>{tx('Location')}<input name="location" /></label>}<label>{tx('Notes')}<textarea name="notes" rows={3} /></label><button className="primary-action wide" type="submit">{tx('Save reminder')}</button></form></section></div>
+      <section className="card-panel form-panel"><span className="section-kicker">{tx(isMedicine ? 'New medicine' : 'New appointment')}</span><h2>{tx('Add a reminder')}</h2><form className="stack-form" onSubmit={(event) => addReminder(event, type)}><label>{tx(isMedicine ? 'Medicine name' : 'Doctor name')}<input name="title" required /></label><div className="two-fields"><label>{tx('Date')}<input type="date" name="date" required={!isMedicine} /></label><label>{tx('Time')}<input type="time" name="time" required /></label></div>{isMedicine ? <><div className="two-fields"><label>{tx('Dosage description')}<input name="dosage" placeholder={tx('e.g. 1 tablet')} /></label><label>{tx('Frequency')}<select name="frequency"><option value="Daily">{tx('Daily')}</option><option value="Twice daily">{tx('Twice daily')}</option><option value="Weekly">{tx('Weekly')}</option><option value="As prescribed">{tx('As prescribed')}</option></select></label></div><div className="two-fields"><label>{tx('Start date')}<input type="date" name="startDate" /></label><label>{tx('End date')}<input type="date" name="endDate" /></label></div></> : <label>{tx('Location')}<input name="location" /></label>}<label>{tx('Notes')}<textarea name="notes" rows={3} /></label><button className="primary-action wide" type="submit">{tx('Save reminder')}</button></form></section></div>
     </>;
   }
 
@@ -702,8 +706,8 @@ export default function MindMitraApp() {
 
   function renderRoutine() {
     return <><PageHeader kicker={tx('Today’s timeline')} title={tx('My Routine')} text={tx('A clear, reassuring plan for the day. Tap an activity when it is complete.')} backLabel={tx('Back')} onBack={() => go('home')} />
-      <div className="two-column"><section className="card-panel"><div className="routine-list">{data.routine.map((item) => <button key={item.id} className={item.done ? 'done' : ''} onClick={() => updateData((current) => ({ ...current, routine: current.routine.map((routine) => routine.id === item.id ? { ...routine, done: !routine.done } : routine) }))}><time>{item.time}</time><i /><span>{item.activity}</span><b>{item.done ? '✓' : '○'}</b></button>)}</div>{!data.routine.length && <EmptyState icon="☀" title={tx('Your day is open')} text={tx('Add the first activity using the form.')} />}</section>
-      <section className="card-panel form-panel"><span className="section-kicker">{tx('New activity')}</span><h2>{tx('Add to today')}</h2><form className="stack-form" onSubmit={addRoutine}><label>{tx('Time')}<input name="time" type="time" required /></label><label>{tx('Activity')}<input name="activity" placeholder="e.g. Morning walk" required /></label><button className="primary-action wide">{tx('Add activity')}</button></form></section></div>
+      <div className="two-column"><section className="card-panel"><div className="routine-list">{data.routine.map((item) => <button key={item.id} className={item.done ? 'done' : ''} onClick={() => updateData((current) => ({ ...current, routine: current.routine.map((routine) => routine.id === item.id ? { ...routine, done: !routine.done } : routine) }))}><time>{item.time}</time><i /><span>{tx(item.activity)}</span><b>{item.done ? '✓' : '○'}</b></button>)}</div>{!data.routine.length && <EmptyState icon="☀" title={tx('Your day is open')} text={tx('Add the first activity using the form.')} />}</section>
+      <section className="card-panel form-panel"><span className="section-kicker">{tx('New activity')}</span><h2>{tx('Add to today')}</h2><form className="stack-form" onSubmit={addRoutine}><label>{tx('Time')}<input name="time" type="time" required /></label><label>{tx('Activity')}<input name="activity" placeholder={tx('e.g. Morning walk')} required /></label><button className="primary-action wide">{tx('Add activity')}</button></form></section></div>
     </>;
   }
 
@@ -713,7 +717,7 @@ export default function MindMitraApp() {
     return <><PageHeader kicker={tx('Cognitive activity')} title={tx('Your Progress')} text={tx('These scores show game practice only. They are not medical measurements or a diagnosis.')} backLabel={tx('Back')} onBack={() => go('home')} />
       <div className="stat-grid"><article><span>✦</span><small>{tx('Games completed')}</small><b>{completedGames}</b></article><article><span>◷</span><small>{tx('This week')}</small><b>{last7.length}</b></article><article><span>◎</span><small>{tx('Average accuracy')}</small><b>{data.results.length ? Math.round(data.results.reduce((sum, result) => sum + result.accuracy, 0) / data.results.length) : 0}%</b></article><article><span>↗</span><small>{tx('Sessions')}</small><b>{data.sessions.length}</b></article></div>
       <section className="card-panel progress-card"><div className="panel-title"><div><span className="section-kicker">{tx('By activity category')}</span><h2>{tx('Game performance')}</h2></div></div><div className="bar-chart">{totals.map((item) => <div key={item.category}><span>{tx(item.category)}</span><div><i style={{ width: `${item.accuracy}%` }} /></div><b>{item.count ? `${item.accuracy}%` : tx('New')}</b></div>)}</div></section>
-      <section className="card-panel"><div className="panel-title"><h2>{tx('Recent activity')}</h2></div><div className="history-list">{data.results.slice().reverse().slice(0, 8).map((result) => <article key={result.id}><span>{GAME_LIBRARY.find((game) => game.id === result.gameId)?.icon ?? '♡'}</span><div><b>{tx(result.game)}</b><small>{new Date(result.date).toLocaleDateString(LANGUAGE_LOCALES[language])} · {tx(result.difficulty)} · {result.responseTime}s</small></div><strong>{result.accuracy}%</strong></article>)}{!data.results.length && <EmptyState icon="↗" title={tx('Your progress starts with one game')} text={tx('Complete a gentle activity and your result will appear here.')} />}</div></section>
+      <section className="card-panel"><div className="panel-title"><h2>{tx('Recent activity')}</h2></div><div className="history-list">{data.results.slice().reverse().slice(0, 8).map((result) => <article key={result.id}><span>{GAME_LIBRARY.find((game) => game.id === result.gameId)?.icon ?? '♡'}</span><div><b>{tx(result.game)}</b><small>{new Date(result.date).toLocaleDateString(LANGUAGE_LOCALES[language])} · {tx(result.difficulty)} · {tx('{count} sec', { count: result.responseTime })}</small></div><strong>{result.accuracy}%</strong></article>)}{!data.results.length && <EmptyState icon="↗" title={tx('Your progress starts with one game')} text={tx('Complete a gentle activity and your result will appear here.')} />}</div></section>
     </>;
   }
 
@@ -721,7 +725,7 @@ export default function MindMitraApp() {
     const examples = ['Start a game', 'Start a 15 minute session', 'Remind me to drink water', 'When is my medicine?', 'What should I do next?', 'Open my family'];
     const conversation = data.conversations.slice(-12);
     return <><PageHeader kicker={tx('Your voice companion')} title={tx('Talk to Mitra')} text={tx('Speak or type naturally. Mitra remembers the recent conversation and responds in {language}.', { language: LANGUAGE_OPTIONS.find((item) => item.value === language)?.label ?? 'English' })} backLabel={tx('Back')} onBack={() => go('home')} />
-      <section className="assistant-card"><div className="mitra-avatar"><span>◉</span><i /></div><div className="conversation" aria-live="polite">{conversation.length ? conversation.map((message) => <div key={message.id} className={`chat-bubble ${message.role === 'user' ? 'user' : ''}`}><small>{message.role === 'user' ? tx('You') : tx('Mitra')}</small><p>{message.text}</p>{message.role === 'assistant' && <button onClick={() => speak(message.text)}>🔊 {tx('Hear this')}</button>}</div>) : <div className="chat-bubble"><small>{tx('Mitra')}</small><p>{mitraReply(language, 'greeting')}</p><button onClick={() => speak(mitraReply(language, 'greeting'))}>🔊 {tx('Hear this')}</button></div>}</div><div className="assistant-compose"><input aria-label={tx('Message Mitra')} value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') runAssistant(); }} placeholder={tx('Type a message or request…')} /><button className="voice-button" onClick={() => listen((value) => { setAssistantInput(value); runAssistant(value); })} aria-label={tx('Speak to Mitra')}>🎤</button><button className="send-button" onClick={() => runAssistant()}>{tx('Send')}</button></div><div className="command-chips">{examples.map((example) => <button key={example} onClick={() => runAssistant(example)}>{tx(example)}</button>)}</div></section>
+      <section className="assistant-card"><div className="mitra-avatar"><span>◉</span><i /></div><div className="conversation" aria-live="polite">{conversation.length ? conversation.map((message) => <div key={message.id} className={`chat-bubble ${message.role === 'user' ? 'user' : ''}`}><small>{message.role === 'user' ? tx('You') : tx('Mitra')}</small><p>{message.text}</p>{message.role === 'assistant' && <button onClick={() => speak(message.text)}>🔊 {tx('Hear this')}</button>}</div>) : <div className="chat-bubble"><small>{tx('Mitra')}</small><p>{mitraReply(language, 'greeting')}</p><button onClick={() => speak(mitraReply(language, 'greeting'))}>🔊 {tx('Hear this')}</button></div>}</div><div className="assistant-compose"><input aria-label={tx('Message Mitra')} value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') runAssistant(); }} placeholder={tx('Type a message or request…')} /><button className="voice-button" onClick={() => listen((value) => { setAssistantInput(value); runAssistant(value); })} aria-label={tx('Speak to Mitra')}>🎤</button><button className="send-button" onClick={() => runAssistant()}>{tx('Send')}</button></div><div className="command-chips">{examples.map((example) => <button key={example} onClick={() => runAssistant(example, tx(example))}>{tx(example)}</button>)}</div></section>
       <p className="privacy-note">{tx('Mitra keeps recent conversation context in your saved MindMitra data. Its built-in companion features do not send the conversation to an external AI service.')}</p>
     </>;
   }
@@ -741,6 +745,7 @@ export default function MindMitraApp() {
   }
 
   function updateProfile<K extends keyof NonNullable<AppData['profile']>>(key: K, value: NonNullable<AppData['profile']>[K]) {
+    if (key === 'language') window.localStorage.setItem('mindmitra-preferred-language', String(value));
     updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, [key]: value } }) : current);
   }
 
@@ -802,7 +807,7 @@ function useLocaleTranslator(language: Language) {
   return useCallback((source: string, values: TranslationValues = {}) => translateText(dictionary, source, values), [dictionary]);
 }
 
-function Welcome({ authUser, nativeApp, profileName, language, onContinue, onDemo, onCreate, onCaregiver }: { authUser: AuthUser | null; nativeApp: boolean; profileName: string; language: Language; onContinue: () => void; onDemo: () => void; onCreate: (language: Language) => void; onCaregiver: (language: Language) => void }) {
+function Welcome({ authUser, nativeApp, profileName, language, onContinue, onDemo, onCreate, onCaregiver }: { authUser: AuthUser | null; nativeApp: boolean; profileName: string; language: Language; onContinue: () => void; onDemo: (language: Language) => void; onCreate: (language: Language) => void; onCaregiver: (language: Language) => void }) {
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(() => {
     if (typeof window === 'undefined') return language;
     const preferred = window.localStorage.getItem('mindmitra-preferred-language') as Language | null;
@@ -812,7 +817,7 @@ function Welcome({ authUser, nativeApp, profileName, language, onContinue, onDem
   const displayName = profileName || authUser?.displayName || '';
   const signIn = displayName ? tx('Continue as {name}', { name: displayName }) : tx('Sign in securely');
   return <main className="welcome-page"><nav className="welcome-nav"><span className="brand"><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></span><label className="language-picker"><span className="sr-only">{tx('Choose language')}</span><select aria-label={tx('Choose language')} value={selectedLanguage} onChange={(event) => { const next = event.target.value as Language; setSelectedLanguage(next); window.localStorage.setItem('mindmitra-preferred-language', next); }}><LanguageOptionList /></select></label></nav>
-    <section className="welcome-hero"><div className="hero-copy"><span className="eyebrow"><i />{tx('A calmer day, one small step at a time')}</span><h1>{tx('Welcome to MindMitra')}</h1><p className="hero-intro">{tx('A simple way to keep your mind active, remember your daily routine, and stay connected.')}</p><div className="welcome-actions">{profileName ? <button className="button button-primary" onClick={onContinue}>{signIn}<span>→</span></button> : authUser || nativeApp ? <button className="button button-primary" onClick={() => onCreate(selectedLanguage)}>{nativeApp ? tx('Create on this device') : signIn}<span>→</span></button> : <a className="button button-primary" href="/signin-with-chatgpt?return_to=%2F">{signIn}<span>→</span></a>}{!nativeApp && <button className="button button-secondary" onClick={() => onCreate(selectedLanguage)}>{tx('Create on this device')}</button>}<button className="button button-quiet" onClick={onDemo}>{tx('Try demo account')}<span>↗</span></button></div><button className="caregiver-entry" onClick={() => onCaregiver(selectedLanguage)}>{tx('I’m a caregiver')} <span>→</span></button><p className="trust-note"><span>✓</span>{tx('Cognitive engagement and daily support — never a medical diagnosis.')}</p></div>
+    <section className="welcome-hero"><div className="hero-copy"><span className="eyebrow"><i />{tx('A calmer day, one small step at a time')}</span><h1>{tx('Welcome to MindMitra')}</h1><p className="hero-intro">{tx('A simple way to keep your mind active, remember your daily routine, and stay connected.')}</p><div className="welcome-actions">{profileName ? <button className="button button-primary" onClick={onContinue}>{signIn}<span>→</span></button> : authUser || nativeApp ? <button className="button button-primary" onClick={() => onCreate(selectedLanguage)}>{nativeApp ? tx('Create on this device') : signIn}<span>→</span></button> : <a className="button button-primary" href="/signin-with-chatgpt?return_to=%2F">{signIn}<span>→</span></a>}{!nativeApp && <button className="button button-secondary" onClick={() => onCreate(selectedLanguage)}>{tx('Create on this device')}</button>}<button className="button button-quiet" onClick={() => onDemo(selectedLanguage)}>{tx('Try demo account')}<span>↗</span></button></div><button className="caregiver-entry" onClick={() => onCaregiver(selectedLanguage)}>{tx('I’m a caregiver')} <span>→</span></button><p className="trust-note"><span>✓</span>{tx('Cognitive engagement and daily support — never a medical diagnosis.')}</p></div>
       <div className="hero-art" aria-label={tx('A gentle illustration representing care, memory, and daily wellbeing')}><div className="sun" /><div className="cloud cloud-one" /><div className="cloud cloud-two" /><div className="hill hill-back" /><div className="hill hill-front" /><div className="care-card"><div className="portrait"><span>👵🏽</span></div><div><p>{tx('Good morning, Maya')}</p><small>{tx('You have 2 gentle activities today.')}</small></div></div><div className="floating-pill pill-memory"><span>✦</span><b>{tx('Mind active')}</b></div><div className="floating-pill pill-routine"><span>✓</span><b>{tx('Routine ready')}</b></div></div></section>
     <section className="welcome-benefits"><article><span>✦</span><div><h2>{tx('Gentle brain games')}</h2><p>{tx('40 short activities that adapt to you.')}</p></div></article><article><span>☀</span><div><h2>{tx('Daily support')}</h2><p>{tx('Friendly reminders for routines, water, and medicine.')}</p></div></article><article><span>⌂</span><div><h2>{tx('Family connection')}</h2><p>{tx('Meaningful games made from your own memories.')}</p></div></article></section></main>;
 }
@@ -849,7 +854,8 @@ function FamilyPortrait({ member, large = false }: { member: FamilyMember; large
 function ReminderRow({ item, tx, onStatus }: { item: Reminder; tx: (source: string, values?: TranslationValues) => string; onStatus: (id: string, status: Reminder['status']) => void }) {
   const typeLabel: Record<Reminder['type'], string> = { medicine: 'Medicine reminders', hydration: 'Hydration', appointment: 'Appointment', routine: 'Routine', session: 'Sessions' };
   const statusLabel: Record<Reminder['status'], string> = { pending: 'Coming up', taken: 'Taken', missed: 'Missed', snoozed: 'Later' };
-  return <article className={`reminder-row status-${item.status}`}><time>{item.time}</time><div><b>{item.title}</b><small>{[item.dosage, item.location, item.date].filter(Boolean).join(' · ') || tx(typeLabel[item.type])}</small><em>{tx(statusLabel[item.status])}</em></div>{item.status === 'pending' ? <div className="reminder-actions"><button onClick={() => onStatus(item.id, 'taken')}>✓ {tx('Taken')}</button><button onClick={() => onStatus(item.id, 'snoozed')}>◷ {tx('Later')}</button><button onClick={() => onStatus(item.id, 'missed')}>× {tx('Missed')}</button></div> : <button className="reset-status" onClick={() => onStatus(item.id, 'pending')}>{tx('Reset')}</button>}</article>;
+  const details = [item.dosage, item.location, item.date].filter(Boolean).map((value) => tx(String(value))).join(' · ');
+  return <article className={`reminder-row status-${item.status}`}><time>{item.time}</time><div><b>{tx(item.title)}</b><small>{details || tx(typeLabel[item.type])}</small><em>{tx(statusLabel[item.status])}</em></div>{item.status === 'pending' ? <div className="reminder-actions"><button onClick={() => onStatus(item.id, 'taken')}>✓ {tx('Taken')}</button><button onClick={() => onStatus(item.id, 'snoozed')}>◷ {tx('Later')}</button><button onClick={() => onStatus(item.id, 'missed')}>× {tx('Missed')}</button></div> : <button className="reset-status" onClick={() => onStatus(item.id, 'pending')}>{tx('Reset')}</button>}</article>;
 }
 
 function Toggle({ label, text, checked, onChange }: { label: string; text: string; checked: boolean; onChange: (checked: boolean) => void }) {

@@ -5,17 +5,10 @@ import { CATEGORIES, GAME_LIBRARY } from '../lib/games';
 import { UI_STRINGS } from '../lib/i18n';
 import type { FamilyGameType, Language } from '../lib/types';
 
-const LANGUAGES: Exclude<Language, 'en'>[] = ['hi', 'bn', 'ta', 'te', 'mr', 'gu', 'kn', 'ml', 'pa', 'as'];
-const scriptChecks: Record<Exclude<Language, 'en'>, RegExp> = {
+const LANGUAGES = ['hi', 'bn', 'as'] as const satisfies readonly Exclude<Language, 'en'>[];
+const scriptChecks: Record<(typeof LANGUAGES)[number], RegExp> = {
   hi: /\p{Script=Devanagari}/u,
   bn: /\p{Script=Bengali}/u,
-  ta: /\p{Script=Tamil}/u,
-  te: /\p{Script=Telugu}/u,
-  mr: /\p{Script=Devanagari}/u,
-  gu: /\p{Script=Gujarati}/u,
-  kn: /\p{Script=Kannada}/u,
-  ml: /\p{Script=Malayalam}/u,
-  pa: /\p{Script=Gurmukhi}/u,
   as: /\p{Script=Bengali}/u,
 };
 
@@ -68,5 +61,4 @@ for (const language of LANGUAGES) {
   console.log(`${language}: ${catalog.length} complete strings, ${changed} localized`);
 }
 
-console.log(`Verified all ${LANGUAGES.length} language packs across 40 games, 400 levels, family games, UI, placeholders, and writing systems.`);
-
+console.log(`Verified Hindi, Bengali, and Assamese across 40 games, 400 levels, family games, UI, placeholders, and writing systems.`);
