@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-mobile --ignore-pattern android --ignore-pattern native-android/build --ignore-pattern .android-sdk --ignore-pattern .gradle-cache --ignore-pattern .jdk --ignore-pattern releases --ignore-pattern .next",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-mobile --ignore-pattern android --ignore-pattern native-android/build --ignore-pattern .android-sdk --ignore-pattern .gradle-cache --ignore-pattern .jdk --ignore-pattern releases --ignore-pattern .next --ignore-pattern work",
     "verify": "tsx scripts/verify-core.ts",
     "mobile:build": "vite build --config vite.mobile.config.ts",
     "android:assets": "node scripts/generate-android-assets.mjs",

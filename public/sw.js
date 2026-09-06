@@ -1,5 +1,9 @@
-const CACHE_NAME = 'mindmitra-v2';
-const APP_SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+const CACHE_NAME = 'mindmitra-v3';
+const APP_SHELL = [
+  '/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png',
+  '/locales/hi.json', '/locales/bn.json', '/locales/ta.json', '/locales/te.json', '/locales/mr.json',
+  '/locales/gu.json', '/locales/kn.json', '/locales/ml.json', '/locales/pa.json', '/locales/as.json',
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));

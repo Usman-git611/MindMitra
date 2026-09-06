@@ -1,11 +1,13 @@
-import type { AppData, Profile } from './types';
+import type { AppData, FamilyGameProgress, GameProgress, Language, Profile, SavedGameRound } from './types';
 
-export const STORAGE_KEY = 'mindmitra-v2';
+export const STORAGE_KEY = 'mindmitra-v3';
+const PREVIOUS_STORAGE_KEY = 'mindmitra-v2';
 const LEGACY_STORAGE_KEY = 'mindcare-ner-v1';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
 export const emptyData: AppData = {
+  schemaVersion: 3,
   profile: null,
   family: [],
   results: [],
@@ -60,35 +62,135 @@ export const demoData: AppData = {
   updatedAt: new Date().toISOString(),
 };
 
+const LANGUAGES: Language[] = ['en', 'hi', 'bn', 'ta', 'te', 'mr', 'gu', 'kn', 'ml', 'pa', 'as'];
+const level = (value: unknown, fallback = 1) => Math.max(1, Math.min(10, Number.isFinite(Number(value)) ? Math.round(Number(value)) : fallback));
+const levels = (value: unknown) => Array.from(new Set((Array.isArray(value) ? value : []).map(Number).filter((item) => Number.isInteger(item) && item >= 1 && item <= 10))).sort((a, b) => a - b);
+
+function savedRound(value: unknown): SavedGameRound | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Partial<SavedGameRound>;
+  const order = levels(source.order);
+  const state = source.state && typeof source.state.prompt === 'string' && typeof source.state.answer === 'string' && Array.isArray(source.state.options)
+    ? { prompt: source.state.prompt, promptValues: source.state.promptValues, options: source.state.options.filter((item): item is string => typeof item === 'string'), answer: source.state.answer, memberId: source.state.memberId }
+    : undefined;
+  return {
+    level: level(source.level),
+    selectedAnswer: typeof source.selectedAnswer === 'string' ? source.selectedAnswer : undefined,
+    startedAt: typeof source.startedAt === 'string' && Number.isFinite(Date.parse(source.startedAt)) ? source.startedAt : new Date().toISOString(),
+    phase: source.phase === 'feedback' ? 'feedback' : 'question',
+    replay: Boolean(source.replay),
+    order: order.length === 10 ? order : undefined,
+    answeredLevels: levels(source.answeredLevels),
+    state,
+  };
+}
+
 export function normalizeData(value: Partial<AppData> | null | undefined): AppData {
-  const profile = value?.profile?.email === 'maya.demo@mindcare.local' ? { ...value.profile, email: 'maya.demo@mindmitra.local' } : value?.profile ?? null;
+  const rawProfile = value?.profile?.email === 'maya.demo@mindcare.local' ? { ...value.profile, email: 'maya.demo@mindmitra.local' } : value?.profile ?? null;
+  const profile = rawProfile ? { ...rawProfile, language: LANGUAGES.includes(rawProfile.language) ? rawProfile.language : 'en' as Language } : null;
+  const gameProgress = Object.fromEntries(Object.entries(value?.gameProgress ?? {}).map(([key, progress]) => {
+    const gameId = Number(key);
+    const current = progress as Partial<GameProgress>;
+    const completedLevels = levels(current.completedLevels);
+    const inProgress = savedRound(current.inProgress);
+    const currentLevel = inProgress?.level ?? level(current.currentLevel);
+    return [key, {
+      gameId,
+      currentLevel,
+      unlockedLevel: Math.max(currentLevel, level(current.unlockedLevel)),
+      completedLevels,
+      attempts: Math.max(0, current.attempts ?? 0),
+      replayCount: Math.max(0, current.replayCount ?? 0),
+      completionCount: Math.max(0, current.completionCount ?? (completedLevels.length === 10 ? 1 : 0)),
+      inProgress,
+      updatedAt: current.updatedAt ?? new Date().toISOString(),
+    } satisfies GameProgress];
+  }));
+  const familyGameProgress = Object.fromEntries(Object.entries(value?.familyGameProgress ?? {}).map(([key, progress]) => {
+    const current = progress as Partial<FamilyGameProgress>;
+    const completedLevels = levels(current.completedLevels);
+    const inProgress = savedRound(current.inProgress);
+    const currentLevel = inProgress?.level ?? level(current.currentLevel);
+    return [key, {
+      type: current.type ?? key as FamilyGameProgress['type'],
+      currentLevel,
+      unlockedLevel: Math.max(currentLevel, level(current.unlockedLevel)),
+      completedLevels,
+      attempts: Math.max(0, current.attempts ?? 0),
+      replayCount: Math.max(0, current.replayCount ?? 0),
+      completionCount: Math.max(0, current.completionCount ?? (completedLevels.length === 10 ? 1 : 0)),
+      inProgress,
+      updatedAt: current.updatedAt ?? new Date().toISOString(),
+    } satisfies FamilyGameProgress];
+  }));
   return {
     ...emptyData,
     ...(value ?? {}),
+    schemaVersion: 3,
     profile,
-    gameProgress: value?.gameProgress ?? {},
-    familyGameProgress: value?.familyGameProgress ?? {},
-    conversations: value?.conversations ?? [],
-    assistantContext: value?.assistantContext ?? emptyData.assistantContext,
+    family: Array.isArray(value?.family) ? value.family : [],
+    results: Array.isArray(value?.results) ? value.results : [],
+    reminders: Array.isArray(value?.reminders) ? value.reminders : [],
+    routine: Array.isArray(value?.routine) ? value.routine : [],
+    favorites: Array.isArray(value?.favorites) ? value.favorites : [],
+    myGames: Array.isArray(value?.myGames) ? value.myGames : [],
+    sessions: Array.isArray(value?.sessions) ? value.sessions : [],
+    hydration: { ...emptyData.hydration, ...(value?.hydration && typeof value.hydration === 'object' ? value.hydration : {}) },
+    gameProgress,
+    familyGameProgress,
+    conversations: Array.isArray(value?.conversations) ? value.conversations : [],
+    assistantContext: value?.assistantContext && typeof value.assistantContext === 'object' ? value.assistantContext : emptyData.assistantContext,
   } as AppData;
 }
 
-export function loadLocalData(): AppData {
+const scopedStorageKey = (ownerId?: string | null) => `${STORAGE_KEY}:${ownerId ? `user:${encodeURIComponent(ownerId)}` : 'guest'}`;
+const pendingDeleteKey = (ownerId: string) => `${STORAGE_KEY}:pending-delete:${encodeURIComponent(ownerId)}`;
+
+export function hasPendingAccountDeletion(ownerId: string): boolean {
+  return typeof window !== 'undefined' && window.localStorage.getItem(pendingDeleteKey(ownerId)) === 'true';
+}
+
+export function markPendingAccountDeletion(ownerId: string, pending: boolean) {
+  if (pending) window.localStorage.setItem(pendingDeleteKey(ownerId), 'true');
+  else window.localStorage.removeItem(pendingDeleteKey(ownerId));
+}
+
+export function loadLocalData(ownerId?: string | null): AppData {
   if (typeof window === 'undefined') return emptyData;
   try {
-    const saved = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (!saved) return emptyData;
-    return normalizeData(JSON.parse(saved) as Partial<AppData>);
+    const scoped = window.localStorage.getItem(scopedStorageKey(ownerId));
+    if (scoped) return normalizeData(JSON.parse(scoped) as Partial<AppData>);
+
+    // Old versions used one device-wide key. Only migrate that value into an
+    // authenticated account when its profile already belongs to that account.
+    for (const key of [PREVIOUS_STORAGE_KEY, LEGACY_STORAGE_KEY]) {
+      const saved = window.localStorage.getItem(key);
+      if (!saved) continue;
+      const parsed = normalizeData(JSON.parse(saved) as Partial<AppData>);
+      if (ownerId && parsed.profile?.id !== ownerId) continue;
+      return parsed;
+    }
+    return emptyData;
   } catch {
     return emptyData;
   }
 }
 
-export function saveLocalData(data: AppData) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...data, updatedAt: new Date().toISOString() }));
+export function saveLocalData(data: AppData, ownerId?: string | null) {
+  window.localStorage.setItem(scopedStorageKey(ownerId), JSON.stringify({ ...data, updatedAt: new Date().toISOString() }));
 }
 
-export function clearLocalData() {
-  window.localStorage.removeItem(STORAGE_KEY);
-  window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+export function clearLocalData(ownerId?: string | null) {
+  window.localStorage.removeItem(scopedStorageKey(ownerId));
+  if (!ownerId) {
+    window.localStorage.removeItem(PREVIOUS_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+    return;
+  }
+  for (const key of [PREVIOUS_STORAGE_KEY, LEGACY_STORAGE_KEY]) {
+    try {
+      const saved = window.localStorage.getItem(key);
+      if (saved && (JSON.parse(saved) as Partial<AppData>).profile?.id === ownerId) window.localStorage.removeItem(key);
+    } catch { /* leave an unrelated or unreadable legacy value untouched */ }
+  }
 }

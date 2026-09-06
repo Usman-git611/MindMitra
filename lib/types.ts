@@ -58,7 +58,8 @@ export interface GameProgress {
   completedLevels: number[];
   attempts: number;
   replayCount: number;
-  inProgress?: { level: number; selectedAnswer?: string; startedAt: string; state?: { prompt: string; options: string[]; answer: string; memberId?: string } };
+  completionCount: number;
+  inProgress?: SavedGameRound;
   updatedAt: string;
 }
 
@@ -71,8 +72,26 @@ export interface FamilyGameProgress {
   completedLevels: number[];
   attempts: number;
   replayCount: number;
-  inProgress?: { level: number; selectedAnswer?: string; startedAt: string; state?: { prompt: string; options: string[]; answer: string; memberId?: string } };
+  completionCount: number;
+  inProgress?: SavedGameRound;
   updatedAt: string;
+}
+
+export interface SavedGameRound {
+  level: number;
+  selectedAnswer?: string;
+  startedAt: string;
+  phase?: 'question' | 'feedback';
+  replay?: boolean;
+  order?: number[];
+  answeredLevels?: number[];
+  state?: {
+    prompt: string;
+    promptValues?: Record<string, string>;
+    options: string[];
+    answer: string;
+    memberId?: string;
+  };
 }
 
 export interface ChatMessage {
@@ -130,6 +149,7 @@ export interface SessionSummary {
 }
 
 export interface AppData {
+  schemaVersion: number;
   profile: Profile | null;
   family: FamilyMember[];
   results: GameResult[];
@@ -159,13 +179,15 @@ export interface GameDefinition {
 export interface GameLevel {
   level: number;
   prompt: string;
+  promptValues?: Record<string, string>;
   options: string[];
   answer: string;
   instruction?: string;
   memoryItems?: string[];
 }
 
-export interface PlayableGame extends Omit<GameDefinition, 'levels'>, GameLevel {
+export interface PlayableGame extends Omit<GameDefinition, 'levels' | 'instruction'>, GameLevel {
+  instruction: string;
   replay?: boolean;
   familyType?: FamilyGameType;
 }

@@ -297,12 +297,21 @@ function shuffled<T>(values: T[]): T[] {
   return next;
 }
 
-export function getPlayableGame(game: GameDefinition, level: number, replay = false): PlayableGame {
+export function createLevelOrder(randomized = false): number[] {
+  const ordered = Array.from({ length: 10 }, (_, index) => index + 1);
+  if (!randomized) return ordered;
+  const next = shuffled(ordered);
+  if (next.every((value, index) => value === ordered[index])) next.push(next.shift()!);
+  return next;
+}
+
+export function getPlayableGame(game: GameDefinition, level: number, replay = false, contentLevel = level): PlayableGame {
   const safeLevel = Math.max(1, Math.min(10, level));
-  const content = game.levels[safeLevel - 1];
+  const safeContentLevel = Math.max(1, Math.min(10, contentLevel));
+  const content = game.levels[safeContentLevel - 1];
   const distractorPool = Array.from(new Set(game.levels.map((item) => item.answer))).filter((answer) => answer !== content.answer);
   const options = shuffled([content.answer, ...shuffled(distractorPool).slice(0, 3)]);
-  return { ...game, ...content, options, replay };
+  return { ...game, ...content, level: safeLevel, options, replay };
 }
 
 export const CATEGORY_INSTRUCTIONS: Partial<Record<Language, Record<Category, string>>> = {
