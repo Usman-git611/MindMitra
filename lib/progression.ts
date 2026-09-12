@@ -34,3 +34,27 @@ export function recordAnsweredLevel<T extends Progress>(progress: T, answer: Ans
   };
 }
 
+export function recordMemoryChainTurn(progress: GameProgress, answer: AnsweredLevel, correct: boolean): GameProgress {
+  const completedLevels = correct ? Array.from(new Set([...progress.completedLevels, answer.level])).sort((a, b) => a - b) : progress.completedLevels;
+  const answeredLevels = correct ? Array.from(new Set([...(progress.inProgress?.answeredLevels ?? progress.completedLevels), answer.level])).sort((a, b) => a - b) : progress.inProgress?.answeredLevels ?? progress.completedLevels;
+  const completedRun = correct && answer.level === 10 && answeredLevels.length === 10;
+  const nextLevel = correct ? Math.min(10, answer.level + 1) : answer.level;
+  return {
+    ...progress,
+    attempts: progress.attempts + 1,
+    completedLevels,
+    unlockedLevel: correct ? Math.min(10, Math.max(progress.unlockedLevel, answer.level + 1)) : progress.unlockedLevel,
+    currentLevel: nextLevel,
+    completionCount: progress.completionCount + (completedRun ? 1 : 0),
+    inProgress: {
+      ...(progress.inProgress ?? { level: nextLevel, startedAt: answer.startedAt }),
+      level: nextLevel,
+      selectedAnswer: answer.selectedAnswer,
+      phase: answer.state.memoryChain?.phase === 'show' ? 'question' : 'feedback',
+      replay: answer.replay,
+      answeredLevels,
+      state: answer.state,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+}

@@ -5,14 +5,21 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 're
 import { CATEGORY_INSTRUCTIONS, CATEGORIES, createBalancedSession, createLevelOrder, difficultyFor, GAME_LIBRARY, getPlayableGame } from '../lib/games';
 import { createFamilyGame, FAMILY_GAME_META } from '../lib/family-games';
 import { loadLanguagePack, translateText, type TranslationDictionary, type TranslationValues } from '../lib/i18n';
-import { detectMitraIntent, LANGUAGE_LOCALES, LANGUAGE_OPTIONS, mitraReply } from '../lib/mitra';
-import { recordAnsweredLevel } from '../lib/progression';
+import { advanceMemoryChain, createMemoryChain, failMemoryChain, isMemoryChainState, memoryChainWord, MEMORY_CHAIN_GAME_ID, validateMemoryChainAnswer } from '../lib/memory-chain';
+import { LANGUAGE_LOCALES, LANGUAGE_OPTIONS } from '../lib/mitra';
+import type { MitraCapabilityId } from '../lib/mitra-capabilities';
+import { mitraCapabilityCount, mitraMessage, understandMitraRequest, type MitraParameters, type SupportedMitraLanguage } from '../lib/mitra-intent';
+import { recordAnsweredLevel, recordMemoryChainTurn } from '../lib/progression';
 import { clearLocalData, demoData, emptyData, hasPendingAccountDeletion, loadLocalData, markPendingAccountDeletion, normalizeData, saveLocalData } from '../lib/storage';
-import type { AppData, Category, FamilyGameProgress, FamilyGameType, FamilyMember, GameDefinition, GameProgress, GameResult, Language, PlayableGame, Reminder, RoutineItem, SessionSummary } from '../lib/types';
+import type { AppData, Category, FamilyGameProgress, FamilyGameType, FamilyMember, GameDefinition, GameProgress, GameResult, Language, MemoryChainCategory, MemoryChainState, PlayableGame, Reminder, RoutineItem, SessionSummary } from '../lib/types';
 
 type Screen = 'welcome' | 'onboarding' | 'greeting' | 'home' | 'games' | 'game-detail' | 'session' | 'game' | 'family' | 'medicines' | 'hydration' | 'routine' | 'appointments' | 'progress' | 'assistant' | 'settings' | 'caregiver' | 'summary';
 type AuthUser = { userId: string; displayName: string; email: string; fullName: string | null };
 type ActiveSession = { id: string; minutes: number; games: GameDefinition[]; index: number; startedAt: string; resultIds: string[] };
+type VoiceStatus = 'idle' | 'requesting' | 'listening' | 'processing' | 'error';
+type NativeSpeechDetail = { type: 'state' | 'partial' | 'result' | 'error'; value: string };
+type NativeMitraBridge = { isAvailable: () => boolean; startListening: (language: string) => void; cancelListening: () => void; speak: (text: string, language: string) => void; stopSpeaking: () => void };
+type MitraExecution = { ok: boolean; reply: string; replyLanguage?: Language; skipSpeech?: boolean; suggestedCapability?: MitraCapabilityId; suggestedParameters?: MitraParameters };
 
 const uid = (prefix = 'id') => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const today = () => new Date().toISOString().slice(0, 10);
@@ -36,12 +43,18 @@ export default function MindMitraApp() {
   const [selectedAnswer, setSelectedAnswer] = useState('');
   const [answerSaved, setAnswerSaved] = useState(false);
   const [gameStartedAt, setGameStartedAt] = useState(0);
+  const [gameSpeechPlaying, setGameSpeechPlaying] = useState(false);
+  const [memoryChain, setMemoryChain] = useState<MemoryChainState | null>(null);
+  const [memoryChainInput, setMemoryChainInput] = useState('');
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [lastSummary, setLastSummary] = useState<SessionSummary | null>(null);
   const [gameCategory, setGameCategory] = useState<'All' | Category>('All');
   const [gameSearch, setGameSearch] = useState('');
   const [assistantInput, setAssistantInput] = useState('');
   const [assistantReply, setAssistantReply] = useState('Hello! I’m Mitra. I’m here with you. What would you like to do?');
+  const [assistantOrigin, setAssistantOrigin] = useState<Screen>('home');
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>('idle');
+  const [recognizedSpeech, setRecognizedSpeech] = useState('');
   const [familyQuiz, setFamilyQuiz] = useState<FamilyMember | null>(null);
   const [customMinutes, setCustomMinutes] = useState(10);
   const [notificationMessage, setNotificationMessage] = useState('');
@@ -49,6 +62,8 @@ export default function MindMitraApp() {
   const [setupLanguage, setSetupLanguage] = useState<Language>('en');
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const translationsRef = useRef<TranslationDictionary>({});
+  const pendingVoiceResult = useRef<((value: string) => void) | null>(null);
+  const gameSpeechTimer = useRef<number | null>(null);
 
   const language: Language = data.profile?.language ?? 'en';
   const tx = useCallback((source: string, values: TranslationValues = {}) => translateText(translations, source, values), [translations]);
@@ -78,8 +93,49 @@ export default function MindMitraApp() {
   }, [language]);
 
   useEffect(() => {
-    if (!data.assistantContext.lastReply) setAssistantReply(mitraReply(language, 'greeting'));
-  }, [data.assistantContext.lastReply, language]);
+    if (!data.assistantContext.lastReply) setAssistantReply(mitraMessage(language, 'greeting', { name: data.profile?.name.split(' ')[0] ?? '' }));
+  }, [data.assistantContext.lastReply, data.profile?.name, language]);
+
+  useEffect(() => {
+    const handleNativeSpeech = (event: Event) => {
+      const detail = (event as CustomEvent<NativeSpeechDetail>).detail;
+      if (!detail) return;
+      if (detail.type === 'state') {
+        setVoiceStatus(detail.value === 'processing' ? 'processing' : detail.value === 'requesting_permission' ? 'requesting' : 'listening');
+        return;
+      }
+      if (detail.type === 'partial') {
+        setVoiceStatus('listening');
+        setRecognizedSpeech(detail.value);
+        return;
+      }
+      if (detail.type === 'result') {
+        setRecognizedSpeech(detail.value);
+        setVoiceStatus('processing');
+        const callback = pendingVoiceResult.current;
+        pendingVoiceResult.current = null;
+        callback?.(detail.value);
+        window.setTimeout(() => setVoiceStatus('idle'), 450);
+        return;
+      }
+      pendingVoiceResult.current = null;
+      setVoiceStatus('error');
+      const message = mitraMessage(language, detail.value === 'permission_denied' ? 'microphoneDenied' : 'voiceUnavailable');
+      setToast(message);
+      window.setTimeout(() => { setToast(''); setVoiceStatus('idle'); }, 4200);
+    };
+    window.addEventListener('mindmitra:native-speech', handleNativeSpeech);
+    return () => window.removeEventListener('mindmitra:native-speech', handleNativeSpeech);
+  }, [language]);
+
+  useEffect(() => {
+    if (!gameSpeechTimer.current) return;
+    window.clearTimeout(gameSpeechTimer.current);
+    gameSpeechTimer.current = null;
+    (window as unknown as { MindMitraNative?: NativeMitraBridge }).MindMitraNative?.stopSpeaking();
+    window.speechSynthesis?.cancel();
+    setGameSpeechPlaying(false);
+  }, [language, screen, selectedGame?.id]);
 
   useEffect(() => {
     let active = true;
@@ -222,24 +278,116 @@ export default function MindMitraApp() {
     setScreen(role === 'caregiver' ? 'caregiver' : 'greeting');
   };
 
-  const speak = (text: string) => {
-    if (!data.profile?.voice || !('speechSynthesis' in window)) return;
+  const speak = (text: string, voiceLanguage: Language = language) => {
+    if (!data.profile?.voice) return;
+    const nativeBridge = (window as unknown as { MindMitraNative?: NativeMitraBridge }).MindMitraNative;
+    if (isNativeApp && nativeBridge) {
+      nativeBridge.speak(text, LANGUAGE_LOCALES[voiceLanguage]);
+      return;
+    }
+    if (!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = LANGUAGE_LOCALES[language];
+    utterance.lang = LANGUAGE_LOCALES[voiceLanguage];
     window.speechSynthesis.speak(utterance);
   };
 
+  const stopSpeaking = () => {
+    const nativeBridge = (window as unknown as { MindMitraNative?: NativeMitraBridge }).MindMitraNative;
+    nativeBridge?.stopSpeaking();
+    window.speechSynthesis?.cancel();
+  };
+
+  const stopGameSpeech = () => {
+    if (gameSpeechTimer.current) window.clearTimeout(gameSpeechTimer.current);
+    gameSpeechTimer.current = null;
+    const nativeBridge = (window as unknown as { MindMitraNative?: NativeMitraBridge }).MindMitraNative;
+    nativeBridge?.stopSpeaking();
+    window.speechSynthesis?.cancel();
+    setGameSpeechPlaying(false);
+  };
+
+  const speakGameText = (text: string) => {
+    stopGameSpeech();
+    const spokenText = text.trim();
+    if (!spokenText) return;
+    const locale = LANGUAGE_LOCALES[language];
+    const nativeBridge = (window as unknown as { MindMitraNative?: NativeMitraBridge }).MindMitraNative;
+    setGameSpeechPlaying(true);
+    if (isNativeApp && nativeBridge) {
+      nativeBridge.speak(spokenText, locale);
+      gameSpeechTimer.current = window.setTimeout(() => setGameSpeechPlaying(false), Math.max(1800, Math.min(14000, spokenText.length * 72)));
+      return;
+    }
+    if (!('speechSynthesis' in window)) {
+      setGameSpeechPlaying(false);
+      notify(tx('Audio is not available on this device.'));
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(spokenText);
+    utterance.lang = locale;
+    const voices = window.speechSynthesis.getVoices();
+    utterance.voice = voices.find((voice) => voice.lang.toLowerCase() === locale.toLowerCase())
+      ?? voices.find((voice) => voice.lang.toLowerCase().startsWith(locale.slice(0, 2).toLowerCase()))
+      ?? voices.find((voice) => voice.default)
+      ?? null;
+    utterance.onend = () => setGameSpeechPlaying(false);
+    utterance.onerror = () => { setGameSpeechPlaying(false); notify(tx('Audio is not available on this device.')); };
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const cancelListening = () => {
+    const nativeBridge = (window as unknown as { MindMitraNative?: NativeMitraBridge }).MindMitraNative;
+    nativeBridge?.cancelListening();
+    pendingVoiceResult.current = null;
+    setVoiceStatus('idle');
+  };
+
   const listen = (onResult: (value: string) => void) => {
+    setRecognizedSpeech('');
+    setVoiceStatus('requesting');
+    const nativeBridge = (window as unknown as { MindMitraNative?: NativeMitraBridge }).MindMitraNative;
+    if (isNativeApp && nativeBridge) {
+      if (!nativeBridge.isAvailable()) {
+        setVoiceStatus('error');
+        notify(mitraMessage(language, 'voiceUnavailable'));
+        return;
+      }
+      pendingVoiceResult.current = onResult;
+      nativeBridge.startListening(LANGUAGE_LOCALES[language]);
+      return;
+    }
     const browser = window as unknown as { SpeechRecognition?: new () => SpeechRecognitionLike; webkitSpeechRecognition?: new () => SpeechRecognitionLike };
     const Recognition = browser.SpeechRecognition ?? browser.webkitSpeechRecognition;
-    if (!Recognition) { notify(tx('Voice input isn’t available. You can type instead.')); return; }
+    if (!Recognition) { setVoiceStatus('error'); notify(mitraMessage(language, 'voiceUnavailable')); return; }
     const recognition = new Recognition();
     recognition.lang = LANGUAGE_LOCALES[language];
     recognition.interimResults = false;
-    recognition.onresult = (event) => onResult(event.results[0][0].transcript);
-    recognition.onerror = () => notify(tx('I couldn’t hear that. Please try again or type instead.'));
+    recognition.onstart = () => setVoiceStatus('listening');
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setRecognizedSpeech(transcript);
+      setVoiceStatus('processing');
+      onResult(transcript);
+    };
+    recognition.onerror = () => { setVoiceStatus('error'); notify(tx('I couldn’t hear that. Please try again or type instead.')); };
+    recognition.onend = () => window.setTimeout(() => setVoiceStatus('idle'), 350);
     recognition.start();
+  };
+
+  const openAssistant = () => {
+    const origin = screen === 'assistant' ? assistantOrigin : screen;
+    setAssistantOrigin(origin);
+    const greeting = mitraMessage(language, 'greeting', { name: data.profile?.name.split(' ')[0] ?? '' });
+    const timestamp = new Date().toISOString();
+    updateData((current) => ({
+      ...current,
+      conversations: [...current.conversations, { id: uid('message'), role: 'assistant' as const, text: greeting, timestamp }].slice(-20),
+      assistantContext: { ...current.assistantContext, lastReply: greeting, currentScreen: origin, updatedAt: timestamp },
+    }));
+    setAssistantReply(greeting);
+    go('assistant');
+    window.setTimeout(() => speak(greeting), 120);
   };
 
   const gameProgressFor = (gameId: number) => data.gameProgress[String(gameId)] ?? newGameProgress(gameId);
@@ -259,11 +407,14 @@ export default function MindMitraApp() {
     const generated = getPlayableGame(game, level, replayRun, order[level - 1] ?? level);
     const savedState = resumingRound ? savedRound?.state : undefined;
     const playable = savedState ? { ...generated, ...savedState } : generated;
+    const restoredMemoryChain = game.id === MEMORY_CHAIN_GAME_ID && isMemoryChainState(savedState?.memoryChain) ? savedState.memoryChain : null;
     const restoredAnswer = resumingRound ? savedRound?.selectedAnswer ?? '' : '';
     const startedAt = resumingRound ? savedRound?.startedAt ?? new Date().toISOString() : new Date().toISOString();
     setFocusedGame(game);
     setFamilyQuiz(null);
     setSelectedGame(playable);
+    setMemoryChain(restoredMemoryChain);
+    setMemoryChainInput(restoredMemoryChain?.lastInput ?? '');
     setSelectedAnswer(restoredAnswer);
     setAnswerSaved(Boolean(resumingRound && savedRound?.phase === 'feedback'));
     setGameStartedAt(new Date(startedAt).getTime() || Date.now());
@@ -271,7 +422,7 @@ export default function MindMitraApp() {
       ...current,
       gameProgress: {
         ...current.gameProgress,
-        [String(game.id)]: { ...(current.gameProgress[String(game.id)] ?? newGameProgress(game.id)), currentLevel: level, inProgress: { level, selectedAnswer: restoredAnswer, startedAt, phase: resumingRound ? savedRound?.phase ?? 'question' : 'question', replay: replayRun, order, answeredLevels, state: { prompt: playable.prompt, promptValues: playable.promptValues, options: playable.options, answer: playable.answer } }, updatedAt: new Date().toISOString() },
+        [String(game.id)]: { ...(current.gameProgress[String(game.id)] ?? newGameProgress(game.id)), currentLevel: level, inProgress: { level, selectedAnswer: restoredAnswer, startedAt, phase: resumingRound ? savedRound?.phase ?? 'question' : 'question', replay: replayRun, order, answeredLevels, state: { prompt: playable.prompt, promptValues: playable.promptValues, options: playable.options, answer: playable.answer, memoryChain: restoredMemoryChain ?? undefined } }, updatedAt: new Date().toISOString() },
       },
     }));
     go('game');
@@ -321,6 +472,110 @@ export default function MindMitraApp() {
     if (activeSession) setActiveSession({ ...activeSession, resultIds: [...activeSession.resultIds, result.id] });
     setAnswerSaved(true);
     if (data.profile?.sound) speak(correct ? tx('Well done — level complete!') : tx('The correct answer is {answer}.', { answer: tx(selectedGame.answer) }));
+  };
+
+  const memoryChainRoundState = (round: MemoryChainState, game: PlayableGame) => ({
+    prompt: game.prompt,
+    promptValues: game.promptValues,
+    options: game.options,
+    answer: game.answer,
+    memoryChain: round,
+  });
+
+  const saveMemoryChainState = (round: MemoryChainState, game: PlayableGame) => {
+    const level = Math.min(10, round.score + 1);
+    const startedAt = new Date(gameStartedAt || Date.now()).toISOString();
+    updateData((current) => {
+      const old = current.gameProgress[String(MEMORY_CHAIN_GAME_ID)] ?? newGameProgress(MEMORY_CHAIN_GAME_ID);
+      return {
+        ...current,
+        gameProgress: {
+          ...current.gameProgress,
+          [String(MEMORY_CHAIN_GAME_ID)]: {
+            ...old,
+            currentLevel: level,
+            inProgress: {
+              ...(old.inProgress ?? { level, startedAt }),
+              level,
+              startedAt,
+              phase: round.phase === 'show' || round.phase === 'recall' ? 'question' : 'feedback',
+              selectedAnswer: round.lastInput,
+              state: memoryChainRoundState(round, game),
+            },
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  };
+
+  const startMemoryChainCategory = (category: MemoryChainCategory) => {
+    const definition = focusedGame ?? GAME_LIBRARY.find((game) => game.id === MEMORY_CHAIN_GAME_ID);
+    if (!definition) return;
+    const progress = gameProgressFor(MEMORY_CHAIN_GAME_ID);
+    const round = createMemoryChain(category, Math.random, progress.currentLevel - 1);
+    const game = getPlayableGame(definition, progress.currentLevel, Boolean(progress.inProgress?.replay));
+    setSelectedGame(game);
+    setMemoryChain(round);
+    setMemoryChainInput('');
+    setSelectedAnswer('');
+    setAnswerSaved(false);
+    setGameStartedAt(Date.now());
+    saveMemoryChainState(round, game);
+  };
+
+  const prepareMemoryChainRecall = () => {
+    if (!memoryChain || !selectedGame || memoryChain.phase !== 'show') return;
+    const next = { ...memoryChain, phase: 'recall' as const };
+    setMemoryChain(next);
+    setMemoryChainInput('');
+    saveMemoryChainState(next, selectedGame);
+  };
+
+  const submitMemoryChainAnswer = (provided = memoryChainInput) => {
+    if (!memoryChain || !selectedGame || memoryChain.phase !== 'recall' || !provided.trim()) return;
+    const checked = validateMemoryChainAnswer(memoryChain, provided);
+    const difficulty = difficultyFor('Memory', data.results);
+    const result: GameResult = {
+      id: uid('result'), gameId: MEMORY_CHAIN_GAME_ID, game: selectedGame.name, category: 'Memory', difficulty,
+      score: checked.correct ? (difficulty === 'Hard' ? 120 : difficulty === 'Medium' ? 110 : 100) : 25,
+      accuracy: checked.correct ? 100 : 0, responseTime: Math.max(1, Math.round((Date.now() - gameStartedAt) / 1000)), mistakes: checked.correct ? 0 : 1,
+      date: new Date().toISOString(), sessionId: activeSession?.id, level: selectedGame.level, replay: selectedGame.replay,
+    };
+    const round = checked.correct
+      ? advanceMemoryChain(memoryChain, checked.userWordId!)
+      : failMemoryChain(memoryChain, provided, checked.reason ?? 'sequence');
+    const nextLevel = checked.correct ? Math.min(10, selectedGame.level + 1) : selectedGame.level;
+    const nextGame = { ...selectedGame, level: nextLevel };
+    const startedAt = new Date(gameStartedAt || Date.now()).toISOString();
+    updateData((current) => {
+      const old = current.gameProgress[String(MEMORY_CHAIN_GAME_ID)] ?? newGameProgress(MEMORY_CHAIN_GAME_ID);
+      return {
+        ...current,
+        results: [...current.results, result],
+        gameProgress: {
+          ...current.gameProgress,
+          [String(MEMORY_CHAIN_GAME_ID)]: recordMemoryChainTurn(old, {
+            level: selectedGame.level,
+            selectedAnswer: provided,
+            startedAt,
+            replay: selectedGame.replay,
+            state: memoryChainRoundState(round, nextGame),
+          }, checked.correct),
+        },
+      };
+    });
+    if (activeSession) setActiveSession({ ...activeSession, resultIds: [...activeSession.resultIds, result.id] });
+    setSelectedGame(nextGame);
+    setMemoryChain(round);
+    setMemoryChainInput('');
+    setAnswerSaved(round.phase === 'complete' || round.phase === 'failed');
+    setGameStartedAt(Date.now());
+    if (data.profile?.sound) speakGameText(tx(checked.correct ? 'Correct — the chain is growing!' : 'That sequence was not quite right.'));
+  };
+
+  const restartMemoryChain = () => {
+    if (memoryChain) startMemoryChainCategory(memoryChain.category);
   };
 
   const continueAfterGame = () => {
@@ -403,6 +658,8 @@ export default function MindMitraApp() {
     const startedAt = resumingRound ? savedRound?.startedAt ?? new Date().toISOString() : new Date().toISOString();
     setFocusedGame(null);
     setSelectedGame(game);
+    setMemoryChain(null);
+    setMemoryChainInput('');
     setFamilyQuiz(member);
     setSelectedAnswer(restoredAnswer);
     setAnswerSaved(Boolean(resumingRound && savedRound?.phase === 'feedback'));
@@ -440,6 +697,12 @@ export default function MindMitraApp() {
     go(selectedGame?.familyType ? 'family' : 'game-detail');
   };
 
+  const storeFamilyMember = (member: Omit<FamilyMember, 'id' | 'createdAt'>) => {
+    const stored: FamilyMember = { ...member, id: uid('family'), createdAt: new Date().toISOString() };
+    updateData((current) => ({ ...current, family: [...current.family, stored] }));
+    return stored;
+  };
+
   const addFamilyMember = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -458,8 +721,7 @@ export default function MindMitraApp() {
         } catch { notify(tx('The photo is safely stored on this device and will be uploaded later.')); }
       }
     }
-    const member: FamilyMember = { id: uid('family'), name: String(form.get('name') ?? ''), relationship: String(form.get('relationship') ?? ''), nickname: String(form.get('nickname') ?? ''), photo, photoKey, createdAt: new Date().toISOString() };
-    updateData((current) => ({ ...current, family: [...current.family, member] }));
+    const member = storeFamilyMember({ name: String(form.get('name') ?? ''), relationship: String(form.get('relationship') ?? ''), nickname: String(form.get('nickname') ?? ''), photo, photoKey });
     formElement.reset();
     notify(tx('{name} was added to My Family.', { name: member.name }));
   };
@@ -473,62 +735,199 @@ export default function MindMitraApp() {
     }));
   };
 
+  const createReminderRecord = (type: Reminder['type'], title: string, time: string, details: Partial<Omit<Reminder, 'id' | 'type' | 'title' | 'time' | 'status' | 'createdAt'>> = {}) => {
+    const reminder: Reminder = { id: uid(type), type, title: title.trim(), time, status: 'pending', createdAt: new Date().toISOString(), ...details };
+    updateData((current) => ({ ...current, reminders: [...current.reminders, reminder] }));
+    return reminder;
+  };
+
   const addReminder = (event: FormEvent<HTMLFormElement>, type: Reminder['type']) => {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const reminder: Reminder = { id: uid(type), type, title: String(form.get('title') ?? ''), time: String(form.get('time') ?? ''), date: String(form.get('date') ?? ''), dosage: String(form.get('dosage') ?? ''), frequency: String(form.get('frequency') ?? ''), startDate: String(form.get('startDate') ?? ''), endDate: String(form.get('endDate') ?? ''), location: String(form.get('location') ?? ''), notes: String(form.get('notes') ?? ''), status: 'pending', createdAt: new Date().toISOString() };
-    updateData((current) => ({ ...current, reminders: [...current.reminders, reminder] }));
+    createReminderRecord(type, String(form.get('title') ?? ''), String(form.get('time') ?? ''), { date: String(form.get('date') ?? ''), dosage: String(form.get('dosage') ?? ''), frequency: String(form.get('frequency') ?? ''), startDate: String(form.get('startDate') ?? ''), endDate: String(form.get('endDate') ?? ''), location: String(form.get('location') ?? ''), notes: String(form.get('notes') ?? '') });
     formElement.reset();
     notify(tx('Reminder saved.'));
   };
 
   const setReminderStatus = (id: string, status: Reminder['status']) => updateData((current) => ({ ...current, reminders: current.reminders.map((item) => item.id === id ? { ...item, status } : item) }));
 
+  const createRoutineRecord = (activity: string, time: string) => {
+    const item: RoutineItem = { id: uid('routine'), time, activity: activity.trim(), done: false };
+    updateData((current) => ({ ...current, routine: [...current.routine, item].sort((a, b) => a.time.localeCompare(b.time)) }));
+    return item;
+  };
+
+  const setRoutineCompletion = (id: string, done: boolean) => updateData((current) => ({ ...current, routine: current.routine.map((item) => item.id === id ? { ...item, done } : item) }));
+  const setRoutineTime = (id: string, time: string) => updateData((current) => ({ ...current, routine: current.routine.map((item) => item.id === id ? { ...item, time } : item).sort((a, b) => a.time.localeCompare(b.time)) }));
+  const recordHydrationGlass = () => {
+    const glasses = Math.min(data.hydration.target, data.hydration.glasses + 1);
+    updateData((current) => ({ ...current, hydration: { ...current.hydration, glasses, date: today() } }));
+    return glasses;
+  };
+  const updateHydrationPlan = (plan: Partial<Pick<AppData['hydration'], 'interval' | 'wakeTime' | 'sleepTime' | 'target'>>) => updateData((current) => ({ ...current, hydration: { ...current.hydration, ...plan } }));
+
   const addRoutine = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const item: RoutineItem = { id: uid('routine'), time: String(form.get('time') ?? ''), activity: String(form.get('activity') ?? ''), done: false };
-    updateData((current) => ({ ...current, routine: [...current.routine, item].sort((a, b) => a.time.localeCompare(b.time)) }));
+    createRoutineRecord(String(form.get('activity') ?? ''), String(form.get('time') ?? ''));
     formElement.reset();
+  };
+
+  const chooseAssistantGame = (category?: Category, query = '') => {
+    const candidates = GAME_LIBRARY.filter((game) => !category || game.category === category);
+    const ignored = new Set(['start', 'open', 'show', 'play', 'game', 'games', 'please', 'mitra', 'memory', 'easy', 'medium', 'hard']);
+    const words = query.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 2 && !ignored.has(word));
+    return candidates.slice().sort((a, b) => {
+      const score = (game: GameDefinition) => words.reduce((total, word) => total + (game.name.toLowerCase().includes(word) ? 2 : game.instruction.toLowerCase().includes(word) ? 1 : 0), 0)
+        + (data.gameProgress[String(game.id)]?.inProgress ? 4 : 0)
+        - (data.gameProgress[String(game.id)]?.completedLevels.length ?? 0) / 20;
+      return score(b) - score(a) || a.id - b.id;
+    })[0];
+  };
+
+  const executeMitraCapability = (capabilityId: MitraCapabilityId, parameters: MitraParameters): MitraExecution => {
+    const success = (reply: string, extra: Partial<MitraExecution> = {}): MitraExecution => ({ ok: true, reply, ...extra });
+    const failure = (reply: string): MitraExecution => ({ ok: false, reply });
+    const named = <T extends { name?: string; title?: string; activity?: string }>(items: T[], query: string) => {
+      const sought = query.trim().toLocaleLowerCase();
+      return items.find((item) => [item.name, item.title, item.activity].some((value) => value?.toLocaleLowerCase() === sought))
+        ?? items.find((item) => [item.name, item.title, item.activity].some((value) => value?.toLocaleLowerCase().includes(sought) || sought.includes(value?.toLocaleLowerCase() ?? '\0')));
+    };
+    const screenReply = (target: Screen, label: string) => { go(target); return success(mitraMessage(language, 'screenOpened', { screen: tx(label) })); };
+    const readMedicine = () => data.reminders.filter((item) => item.type === 'medicine' && item.status === 'pending').sort((a, b) => a.time.localeCompare(b.time))[0];
+    const readAppointment = () => data.reminders.filter((item) => item.type === 'appointment' && item.status === 'pending').sort((a, b) => `${a.date ?? ''}${a.time}`.localeCompare(`${b.date ?? ''}${b.time}`))[0];
+
+    // The type makes the build fail whenever a static capability is added
+    // without a validated executor over the existing application functions.
+    const runtimeCapabilityRegistry: Record<MitraCapabilityId, () => MitraExecution> = {
+      'navigation.home': () => screenReply('home', 'Home'),
+      'navigation.back': () => screenReply(assistantOrigin === 'assistant' ? 'home' : assistantOrigin, 'previous page'),
+      'games.open': () => { const category = parameters.category as Category | undefined; setGameCategory(category ?? 'All'); go('games'); return success(mitraMessage(language, 'gamesOpened', { category: category ? tx(category) : tx('available') })); },
+      'games.start': () => { const game = chooseAssistantGame(parameters.category as Category | undefined, String(parameters.gameQuery ?? '')); if (!game) return failure(mitraMessage(language, 'noGame')); launchGame(game); return success(mitraMessage(language, 'gameStarted', { game: tx(game.name) })); },
+      'games.resume': () => { const saved = GAME_LIBRARY.find((game) => data.gameProgress[String(game.id)]?.inProgress); if (!saved) return failure(mitraMessage(language, 'noGame')); launchGame(saved); return success(mitraMessage(language, 'gameResumed', { game: tx(saved.name) })); },
+      'games.explain': () => selectedGame ? success(mitraMessage(language, 'gameInstructions', { instruction: tx(selectedGame.instruction) })) : failure(mitraMessage(language, 'noGame')),
+      'games.favorite.add': () => { const gameId = selectedGame?.id ?? focusedGame?.id; if (!gameId) return failure(mitraMessage(language, 'noGame')); updateData((current) => ({ ...current, favorites: Array.from(new Set([...current.favorites, gameId])) })); return success(mitraMessage(language, 'favoriteAdded')); },
+      'games.favorite.remove': () => { const gameId = selectedGame?.id ?? focusedGame?.id; if (!gameId) return failure(mitraMessage(language, 'noGame')); updateData((current) => ({ ...current, favorites: current.favorites.filter((id) => id !== gameId) })); return success(mitraMessage(language, 'favoriteRemoved')); },
+      'games.favorites.open': () => { setGameCategory('All'); setGameSearch(''); go('games'); return success(mitraMessage(language, 'favoritesOpened')); },
+      'games.my.add': () => { const gameId = selectedGame?.id ?? focusedGame?.id; if (!gameId) return failure(mitraMessage(language, 'noGame')); updateData((current) => ({ ...current, myGames: Array.from(new Set([...current.myGames, gameId])) })); return success(mitraMessage(language, 'myGamesAdded')); },
+      'games.my.remove': () => { const gameId = selectedGame?.id ?? focusedGame?.id; if (!gameId) return failure(mitraMessage(language, 'noGame')); updateData((current) => ({ ...current, myGames: current.myGames.filter((id) => id !== gameId) })); return success(mitraMessage(language, 'myGamesRemoved')); },
+      'games.my.open': () => { setGameCategory('All'); setGameSearch(''); go('games'); return success(mitraMessage(language, 'myGamesOpened')); },
+      'session.open': () => screenReply('session', 'Start Session'),
+      'session.start': () => { const minutes = Number(parameters.minutes); if (!Number.isFinite(minutes) || minutes < 1) return failure(mitraMessage(language, 'actionFailed')); startSession(minutes); return success(mitraMessage(language, 'sessionStarted', { minutes })); },
+      'session.pause': () => { if (!activeSession) return failure(mitraMessage(language, 'noSession')); go('home'); return success(mitraMessage(language, 'sessionPaused')); },
+      'session.resume': () => { if (!activeSession || !selectedGame) return failure(mitraMessage(language, 'noSession')); go('game'); return success(mitraMessage(language, 'sessionResumed')); },
+      'session.finish': () => { if (!activeSession) return failure(mitraMessage(language, 'noSession')); const results = data.results.filter((item) => item.sessionId === activeSession.id); const accuracy = results.length ? Math.round(results.reduce((sum, item) => sum + item.accuracy, 0) / results.length) : 0; const summary: SessionSummary = { id: activeSession.id, plannedMinutes: activeSession.minutes, startedAt: activeSession.startedAt, endedAt: new Date().toISOString(), gamesCompleted: results.length, accuracy }; updateData((current) => ({ ...current, sessions: [...current.sessions, summary] })); setLastSummary(summary); setActiveSession(null); go('summary'); return success(mitraMessage(language, 'sessionFinished')); },
+      'family.open': () => { go('family'); return success(mitraMessage(language, 'familyOpened', { count: data.family.length })); },
+      'family.add': () => { const name = String(parameters.memberName ?? '').trim(); const relationship = String(parameters.relationship ?? '').trim(); if (!name || !relationship) return failure(mitraMessage(language, 'actionFailed')); storeFamilyMember({ name, relationship, photo: '' }); return success(mitraMessage(language, 'familyAdded', { name })); },
+      'family.remove': () => { const member = named(data.family, String(parameters.memberName ?? '')); if (!member) return failure(mitraMessage(language, 'notFound')); void removeFamilyMember(member); return success(mitraMessage(language, 'familyRemoved', { name: member.name })); },
+      'family.game.start': () => { if (!data.family.length) { go('family'); return failure(mitraMessage(language, 'noFamily')); } startFamilyGame(String(parameters.familyGameType ?? 'who') as FamilyGameType); return success(mitraMessage(language, 'familyGameStarted')); },
+      'medicine.open': () => screenReply('medicines', 'Medicines'),
+      'medicine.read': () => { const medicine = readMedicine(); return medicine ? success(mitraMessage(language, 'medicineNext', { detail: `${tx(medicine.title)} · ${medicine.time}` })) : failure(mitraMessage(language, 'medicineNone')); },
+      'medicine.create': () => { const title = String(parameters.title); const time = String(parameters.time); createReminderRecord('medicine', title, time); return success(mitraMessage(language, 'medicineCreated', { title, time })); },
+      'medicine.status': () => { const reminder = readMedicine(); if (!reminder) return failure(mitraMessage(language, 'medicineNone')); setReminderStatus(reminder.id, 'taken'); return success(mitraMessage(language, 'reminderStatusUpdated', { title: tx(reminder.title), status: tx('taken') })); },
+      'reminder.create': () => { const kind = String(parameters.reminderKind) as Reminder['type']; const title = String(parameters.title); const time = String(parameters.time); createReminderRecord(['medicine', 'hydration', 'appointment', 'routine', 'session'].includes(kind) ? kind : 'routine', title, time); return success(mitraMessage(language, 'reminderCreated', { title, time })); },
+      'reminder.status': () => { const reminder = data.reminders.find((item) => item.status === 'pending'); const status = String(parameters.status) as Reminder['status']; if (!reminder || !['taken', 'missed', 'snoozed'].includes(status)) return failure(mitraMessage(language, 'notFound')); setReminderStatus(reminder.id, status); return success(mitraMessage(language, 'reminderStatusUpdated', { title: tx(reminder.title), status: tx(status) })); },
+      'appointment.open': () => screenReply('appointments', 'Appointments'),
+      'appointment.read': () => { const appointment = readAppointment(); return appointment ? success(mitraMessage(language, 'appointmentNext', { detail: `${tx(appointment.title)} · ${appointment.date ?? today()} · ${appointment.time}${appointment.location ? ` · ${appointment.location}` : ''}` })) : failure(mitraMessage(language, 'appointmentNone')); },
+      'appointment.create': () => { const title = String(parameters.title); const date = String(parameters.date); const time = String(parameters.time); createReminderRecord('appointment', title, time, { date }); return success(mitraMessage(language, 'appointmentCreated', { title, date, time })); },
+      'routine.open': () => screenReply('routine', 'My Routine'),
+      'routine.read': () => { const item = data.routine.find((entry) => !entry.done); return item ? success(mitraMessage(language, 'routineNext', { detail: `${tx(item.activity)} · ${item.time}` })) : failure(mitraMessage(language, 'routineNone')); },
+      'routine.create': () => { const activity = String(parameters.activity); const time = String(parameters.time); createRoutineRecord(activity, time); return success(mitraMessage(language, 'routineCreated', { activity, time })); },
+      'routine.complete': () => { const item = parameters.activity ? named(data.routine, String(parameters.activity)) : data.routine.find((entry) => !entry.done); if (!item) return failure(mitraMessage(language, 'notFound')); setRoutineCompletion(item.id, true); return success(mitraMessage(language, 'routineCompleted', { activity: tx(item.activity) })); },
+      'routine.modify': () => { const item = named(data.routine, String(parameters.activity)); const time = String(parameters.time); if (!item) return failure(mitraMessage(language, 'notFound')); setRoutineTime(item.id, time); return success(mitraMessage(language, 'routineModified', { activity: tx(item.activity), time })); },
+      'hydration.open': () => screenReply('hydration', 'Hydration'),
+      'hydration.read': () => success(mitraMessage(language, 'hydrationProgress', { current: data.hydration.glasses, target: data.hydration.target })),
+      'hydration.record': () => { const current = recordHydrationGlass(); return success(mitraMessage(language, 'hydrationRecorded', { current, target: data.hydration.target })); },
+      'hydration.reminder': () => { const time = String(parameters.time); createReminderRecord('hydration', 'Drink a glass of water', time); return success(mitraMessage(language, 'waterReminder', { time })); },
+      'hydration.plan': () => { const target = parameters.target === undefined ? data.hydration.target : Math.max(1, Math.min(20, Number(parameters.target))); const interval = parameters.interval === undefined ? data.hydration.interval : Math.max(30, Math.min(360, Number(parameters.interval))); updateHydrationPlan({ target, interval }); return success(mitraMessage(language, 'hydrationPlanUpdated')); },
+      'progress.open': () => screenReply('progress', 'Your Progress'),
+      'progress.read': () => { const average = data.results.length ? Math.round(data.results.reduce((sum, item) => sum + item.accuracy, 0) / data.results.length) : 0; return success(mitraMessage(language, 'progress', { count: data.results.length, accuracy: average })); },
+      'settings.open': () => screenReply('settings', 'Settings'),
+      'settings.language': () => { const nextLanguage = String(parameters.language) as SupportedMitraLanguage; if (!['en', 'hi', 'bn', 'as'].includes(nextLanguage)) return failure(mitraMessage(language, 'actionFailed')); updateProfile('language', nextLanguage); return success(mitraMessage(nextLanguage, 'languageChanged'), { replyLanguage: nextLanguage }); },
+      'settings.text': () => { const value = String(parameters.textSize) as 'normal' | 'large' | 'extra'; updateProfile('textSize', value); return success(mitraMessage(language, 'settingChanged', { setting: tx('Text size'), value: tx(value) })); },
+      'settings.contrast': () => { const value = Boolean(parameters.enabled); updateProfile('highContrast', value); return success(mitraMessage(language, 'settingChanged', { setting: tx('High contrast'), value: tx(value ? 'enabled' : 'disabled') })); },
+      'settings.voice': () => { const value = Boolean(parameters.enabled); updateProfile('voice', value); return success(mitraMessage(language, 'settingChanged', { setting: tx('Voice responses'), value: tx(value ? 'enabled' : 'disabled') }), { skipSpeech: !value }); },
+      'settings.sound': () => { const value = Boolean(parameters.enabled); updateProfile('sound', value); return success(mitraMessage(language, 'settingChanged', { setting: tx('Sound effects'), value: tx(value ? 'enabled' : 'disabled') })); },
+      'settings.motion': () => { const value = Boolean(parameters.enabled); updateProfile('reducedMotion', value); return success(mitraMessage(language, 'settingChanged', { setting: tx('Reduced motion'), value: tx(value ? 'enabled' : 'disabled') })); },
+      'settings.notifications': () => { void requestNotifications(); return success(mitraMessage(language, 'screenOpened', { screen: tx('Notifications') })); },
+      'profile.edit': () => screenReply('onboarding', 'Edit profile'),
+      'caregiver.open': () => screenReply('caregiver', 'Caregiver Dashboard'),
+      'sos.open': () => { setShowSos(true); return success(mitraMessage(language, 'sos', { contact: data.profile?.emergencyName || tx('your emergency contact') })); },
+      'assistant.help': () => success(mitraMessage(language, 'help', { count: mitraCapabilityCount })),
+      'assistant.repeat': () => success(data.assistantContext.lastReply || assistantReply),
+      'assistant.stop': () => { stopSpeaking(); return success(mitraMessage(language, 'stopped'), { skipSpeech: true }); },
+      'assistant.greeting': () => success(mitraMessage(language, 'greeting', { name: data.profile?.name.split(' ')[0] ?? '' })),
+      'assistant.wellbeing': () => success(mitraMessage(language, 'wellbeing'), { suggestedCapability: 'games.start', suggestedParameters: { category: 'Memory', difficulty: 'Easy', gameQuery: 'easy memory game' } }),
+      'assistant.medical-boundary': () => success(mitraMessage(language, 'medicalBoundary')),
+      'account.logout': () => { window.setTimeout(() => { if (authUser) window.location.href = '/signout-with-chatgpt?return_to=%2F'; else setScreen('welcome'); }, 350); return success(mitraMessage(language, 'screenOpened', { screen: tx('Log out') })); },
+      'account.delete': () => { window.setTimeout(() => void deleteAccount(true), 350); return success(mitraMessage(language, 'screenOpened', { screen: tx('Delete my account and data') })); },
+    };
+    return runtimeCapabilityRegistry[capabilityId]();
   };
 
   const runAssistant = (value = assistantInput, displayedValue = value) => {
     const command = value.trim();
     if (!command) return;
-    const intent = detectMitraIntent(command, data.assistantContext.lastIntent);
-    let reply = '';
-    if (intent === 'session') { reply = mitraReply(language, intent); startSession(15); }
-    else if (intent === 'game') {
-      reply = mitraReply(language, intent);
-      const resumable = GAME_LIBRARY.find((game) => Boolean(data.gameProgress[String(game.id)]?.inProgress));
-      if (/continue|resume|जारी|চালিয়ে|தொடர|కొనసాగ|पुढे|ચાલુ|ಮುಂದುವರಿ|തുടര|ਜਾਰੀ|আগবঢ়/.test(command.toLowerCase()) && resumable) openGame(resumable);
-      else go('games');
+    const contextScreen = screen === 'assistant' ? assistantOrigin : screen;
+    const understood = understandMitraRequest(command, {
+      lastIntent: data.assistantContext.lastIntent,
+      lastCapability: data.assistantContext.lastCapability,
+      pendingCapability: data.assistantContext.pendingCapability,
+      missingParameters: data.assistantContext.missingParameters,
+      collectedParameters: data.assistantContext.collectedParameters,
+      awaitingConfirmation: data.assistantContext.awaitingConfirmation,
+      lastCategory: data.assistantContext.lastCategory,
+      currentScreen: contextScreen,
+      currentUser: data.profile?.id,
+      currentLanguage: language,
+      currentGameName: contextScreen === 'game' ? selectedGame?.name : undefined,
+      currentSessionMinutes: activeSession?.minutes,
+      knownRoutineActivities: data.routine.map((item) => item.activity),
+      knownFamilyNames: data.family.map((item) => item.name),
+    });
+    let execution: MitraExecution;
+    if (understood.state === 'ambiguous') execution = { ok: false, reply: mitraMessage(language, 'unknown') };
+    else if (understood.state === 'cancelled') execution = { ok: true, reply: mitraMessage(language, 'cancelled') };
+    else if (understood.state === 'needs-parameter') execution = { ok: true, reply: mitraMessage(language, understood.promptKey ?? 'unknown') };
+    else if (understood.state === 'needs-confirmation') {
+      const action = language === 'hi' ? 'यह कार्रवाई करूँ' : language === 'bn' ? 'এই কাজটি করব' : language === 'as' ? 'এই কামটো' : 'continue with this action';
+      execution = { ok: true, reply: mitraMessage(language, 'confirmAction', { action }) };
     }
-    else if (intent === 'water') {
-      const reminder: Reminder = { id: uid('hydration'), type: 'hydration', title: 'Drink a glass of water', time: new Date(Date.now() + 30 * 60000).toTimeString().slice(0, 5), status: 'pending', createdAt: new Date().toISOString() };
-      updateData((current) => ({ ...current, reminders: [...current.reminders, reminder] })); reply = mitraReply(language, intent);
+    else if (!understood.capabilityId || !understood.capability) execution = { ok: false, reply: mitraMessage(language, 'unknown') };
+    else if (!online && !understood.capability.canExecuteOffline) execution = { ok: false, reply: mitraMessage(language, 'offlineUnavailable') };
+    else {
+      try { execution = executeMitraCapability(understood.capabilityId, understood.parameters); }
+      catch { execution = { ok: false, reply: mitraMessage(language, 'actionFailed') }; }
     }
-    else if (intent === 'medicine') { const medicine = data.reminders.find((item) => item.type === 'medicine' && item.status === 'pending'); reply = mitraReply(language, intent, { detail: medicine ? `${tx(medicine.title)} · ${medicine.time}` : tx('not currently scheduled') }); go('medicines'); }
-    else if (intent === 'routine') { const next = data.routine.find((item) => !item.done); reply = mitraReply(language, intent, { detail: next ? `${tx(next.activity)} · ${next.time}` : tx('complete for today') }); go('routine'); }
-    else if (intent === 'progress') { const average = data.results.length ? Math.round(data.results.reduce((sum, item) => sum + item.accuracy, 0) / data.results.length) : 0; reply = mitraReply(language, intent, { count: data.results.length, accuracy: average }); go('progress'); }
-    else if (intent === 'sos') { reply = mitraReply(language, intent); setShowSos(true); }
-    else if (intent === 'family') { reply = mitraReply(language, intent, { count: data.family.length }); go('family'); }
-    else if (intent === 'language') { reply = mitraReply(language, intent); go('settings'); }
-    else if (intent === 'large') { updateData((current) => current.profile ? ({ ...current, profile: { ...current.profile, textSize: 'extra' } }) : current); reply = mitraReply(language, intent); }
-    else if (intent === 'repeat') { reply = data.assistantContext.lastReply || assistantReply; speak(reply); }
-    else if (intent === 'stop') { window.speechSynthesis?.cancel(); reply = mitraReply(language, intent); }
-    else reply = mitraReply(language, intent);
+
+    const pending = understood.state === 'needs-parameter' || understood.state === 'needs-confirmation';
     const now = new Date().toISOString();
     updateData((current) => ({
       ...current,
-      conversations: [...current.conversations, { id: uid('message'), role: 'user' as const, text: displayedValue, timestamp: now }, { id: uid('message'), role: 'assistant' as const, text: reply, timestamp: now }].slice(-60),
-      assistantContext: { lastIntent: intent, lastReply: reply, updatedAt: now },
+      conversations: [...current.conversations, { id: uid('message'), role: 'user' as const, text: displayedValue, timestamp: now }, { id: uid('message'), role: 'assistant' as const, text: execution.reply, timestamp: now }].slice(-20),
+      assistantContext: {
+        lastIntent: understood.intent,
+        lastCapability: understood.capabilityId ?? current.assistantContext.lastCapability,
+        lastReply: execution.reply,
+        pendingCapability: execution.suggestedCapability ?? (pending ? understood.capabilityId : undefined),
+        missingParameters: pending ? understood.missingParameters : undefined,
+        collectedParameters: execution.suggestedParameters ?? (pending ? understood.parameters : undefined),
+        awaitingConfirmation: Boolean(execution.suggestedCapability) || understood.state === 'needs-confirmation',
+        lastActionResult: understood.state === 'cancelled' ? 'cancelled' : execution.ok ? 'success' : 'failed',
+        lastCategory: understood.category ?? current.assistantContext.lastCategory,
+        currentScreen: contextScreen,
+        currentUser: data.profile?.id,
+        currentLanguage: execution.replyLanguage ?? language,
+        currentGame: selectedGame?.name,
+        currentSessionMinutes: activeSession?.minutes,
+        updatedAt: now,
+      },
     }));
-    setAssistantReply(reply);
+    setAssistantReply(execution.reply);
     setAssistantInput('');
-    if (intent !== 'repeat') speak(reply);
+    if (!execution.skipSpeech) speak(execution.reply, execution.replyLanguage ?? language);
   };
 
   if (!ready) return <main className="app-loading" aria-live="polite">{tx('Preparing MindMitra…')}</main>;
@@ -556,7 +955,7 @@ export default function MindMitraApp() {
   })();
 
   return (
-    <div className={`mindcare-app text-${data.profile.textSize} ${data.profile.highContrast ? 'high-contrast' : ''} ${data.profile.reducedMotion ? 'reduced-motion' : ''}`}>
+    <div className={`mindcare-app text-${data.profile.textSize} ${data.profile.highContrast ? 'high-contrast' : ''} ${data.profile.reducedMotion ? 'reduced-motion' : ''} ${screen === 'assistant' ? 'assistant-active' : ''}`}>
       <aside className="side-nav" aria-label={tx('Main navigation')}>
         <button className="brand app-brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></button>
         <NavButton icon="⌂" label={tx('Home')} active={screen === 'home'} onClick={() => go('home')} />
@@ -572,7 +971,7 @@ export default function MindMitraApp() {
           <button className="mobile-brand brand" onClick={() => go('home')}><span className="brand-mark">m</span><span>Mind<b>Mitra</b></span></button>
           <div className={`connection ${online && !isNativeApp ? '' : 'is-offline'}`}><i />{isNativeApp ? tx('Saved on this phone') : !online ? tx('Offline · saved here') : syncStatus === 'syncing' ? tx('Saving…') : syncStatus === 'synced' ? tx('Everything saved') : tx('Online · saved')}</div>
           <label className="dashboard-language"><span className="sr-only">{tx('Choose language')}</span><select aria-label={tx('Choose language')} value={language} onChange={(event) => updateProfile('language', event.target.value as Language)}><LanguageOptionList /></select></label>
-          <button className="mitra-quick" onClick={() => go('assistant')}><span>◉</span>{tx('Talk to Mitra')}</button>
+          <button className="mitra-quick" onClick={openAssistant} aria-label={tx('Talk to Mitra')}><span className="mitra-logo-small">m</span>{tx('Talk to Mitra')}</button>
           <button className="sos-quick" onClick={() => setShowSos(true)}>! <span>{tx('SOS')}</span></button>
         </header>
         {notificationMessage && <div className="due-banner" role="alert"><span>🔔</span><b>{tx(notificationMessage)}</b><button onClick={() => setNotificationMessage('')}>{tx('Dismiss')}</button></div>}
@@ -581,10 +980,11 @@ export default function MindMitraApp() {
           <NavButton icon="⌂" label={tx('Home')} active={screen === 'home'} onClick={() => go('home')} />
           <NavButton icon="✦" label={tx('Games')} active={['games', 'game-detail', 'session', 'game'].includes(screen)} onClick={() => go('games')} />
           <NavButton icon="♡" label={tx('Family')} active={screen === 'family'} onClick={() => go('family')} />
-          <NavButton icon="◉" label={tx('Mitra')} active={screen === 'assistant'} onClick={() => go('assistant')} />
+          <NavButton icon="m" label={tx('Mitra')} active={screen === 'assistant'} onClick={openAssistant} />
           <NavButton icon="⚙" label={tx('Settings')} active={screen === 'settings'} onClick={() => go('settings')} />
         </nav>
       </div>
+      {screen !== 'assistant' && <button className="mitra-fab" onClick={openAssistant} aria-label={tx('Open Mitra assistant')}><span>m</span><b>{tx('Ask Mitra')}</b></button>}
       {showSos && <SosModal profile={data.profile} tx={tx} onClose={() => setShowSos(false)} />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
@@ -632,7 +1032,7 @@ export default function MindMitraApp() {
       <PageHeader kicker={tx('Game center')} title={tx('Choose a gentle activity')} text={tx('Every game has 10 meaningful levels. Your exact place is saved automatically.')} backLabel={tx('Back')} onBack={() => go('home')} />
       <div className="game-actions"><button className="primary-action" onClick={() => go('session')}>◷ {tx('Start a balanced session')}</button><label className="search-box">⌕<input value={gameSearch} onChange={(event) => setGameSearch(event.target.value)} placeholder={tx('Find a game')} /></label></div>
       <section><div className="section-heading compact"><div><span className="section-kicker">{tx('Recommended for you')}</span><h2>{tx('Good choices for today')}</h2></div></div><div className="recommended-row">{recommended.map(card)}</div></section>
-      <section><div className="section-heading compact"><div><span className="section-kicker">{tx('{count} games · 400 levels', { count: GAME_LIBRARY.length })}</span><h2>{tx('Explore every activity')}</h2></div></div><div className="category-tabs"><button className={gameCategory === 'All' ? 'active' : ''} onClick={() => setGameCategory('All')}>{tx('All')}</button>{CATEGORIES.map((category) => <button className={gameCategory === category ? 'active' : ''} key={category} onClick={() => setGameCategory(category)}>{tx(category)}</button>)}</div><div className="game-grid">{filtered.map(card)}</div></section>
+      <section><div className="section-heading compact"><div><span className="section-kicker">{tx('{count} games · {levels} levels', { count: GAME_LIBRARY.length, levels: GAME_LIBRARY.reduce((sum, game) => sum + game.levels.length, 0) })}</span><h2>{tx('Explore every activity')}</h2></div></div><div className="category-tabs"><button className={gameCategory === 'All' ? 'active' : ''} onClick={() => setGameCategory('All')}>{tx('All')}</button>{CATEGORIES.map((category) => <button className={gameCategory === category ? 'active' : ''} key={category} onClick={() => setGameCategory(category)}>{tx(category)}</button>)}</div><div className="game-grid">{filtered.map(card)}</div></section>
     </>;
   }
 
@@ -647,7 +1047,7 @@ export default function MindMitraApp() {
     return <>
       <PageHeader kicker={`${tx(focusedGame.category)} · 10 ${tx('levels')}`} title={tx(focusedGame.name)} text={tx(focusedGame.instruction)} backLabel={tx('Back')} onBack={() => go('games')} />
       <section className="level-overview card-panel">
-        <div className="level-overview-head"><div className={`game-icon game-${focusedGame.category.toLowerCase()}`}>{focusedGame.icon}</div><div><span>{tx('{count} of 10 completed', { count: progress.completedLevels.length })}</span><h2>{finished ? tx('All levels complete!') : progress.inProgress ? tx('Ready to resume Level {level}', { level: progress.inProgress.level }) : tx('Level {level} is ready', { level: progress.currentLevel })}</h2><p>{tx('Your progress is saved on this device and synced with your account when signed in.')}</p><small>{progress.completionCount === 1 ? tx('Completed {count} time', { count: progress.completionCount }) : tx('Completed {count} times', { count: progress.completionCount })}</small></div></div>
+        <div className="level-overview-head"><GameVisual visual={focusedGame.visual} label={tx(focusedGame.name)} compact /><div><span>{tx('{count} of 10 completed', { count: progress.completedLevels.length })}</span><h2>{finished ? tx('All levels complete!') : progress.inProgress ? tx('Ready to resume Level {level}', { level: progress.inProgress.level }) : tx('Level {level} is ready', { level: progress.currentLevel })}</h2><p>{tx('Your progress is saved on this device and synced with your account when signed in.')}</p><small>{progress.completionCount === 1 ? tx('Completed {count} time', { count: progress.completionCount }) : tx('Completed {count} times', { count: progress.completionCount })}</small></div></div>
         <div className="level-progress-track"><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></div>
         <div className="level-actions">{finished ? <button className="primary-action" onClick={() => beginGameReplay(focusedGame)}>↻ {tx('Replay with a fresh shuffle')}</button> : <button className="primary-action" onClick={() => launchGame(focusedGame)}>{progress.inProgress ? tx('Continue') : tx('Play')} →</button>}<button className="secondary-action" onClick={() => go('games')}>{tx('Exit')}</button></div>
       </section>
@@ -660,16 +1060,60 @@ export default function MindMitraApp() {
       <div className="distribution-preview"><span>◎</span><div><b>{tx('Fair and balanced')}</b><p>{tx('The session rotates through all eight cognitive activity categories. Your difficulty level is adapted per category, never treated as a medical measurement.')}</p></div></div></>;
   }
 
+  function renderMemoryChain() {
+    if (!selectedGame) return null;
+    const difficulty = difficultyFor('Memory', data.results);
+    const level = memoryChain ? Math.min(10, memoryChain.score + 1) : selectedGame.level;
+    const categoryLabel = memoryChain ? tx(memoryChain.category === 'fruits' ? 'Fruits' : 'Vegetables') : '';
+    const itemLabel = memoryChain ? tx(memoryChain.category === 'fruits' ? 'fruit' : 'vegetable') : '';
+    const sequence = memoryChain?.sequence.map((entry) => memoryChainWord(memoryChain.category, entry.wordId, language)) ?? [];
+    const instruction = tx(selectedGame.instruction);
+    const prompt = !memoryChain
+      ? tx('Choose Fruits or Vegetables to begin your memory chain.')
+      : memoryChain.phase === 'show'
+        ? tx('Remember the complete chain. Then hide it and repeat every item in order, adding one new {category}.', { category: itemLabel })
+        : memoryChain.phase === 'recall'
+          ? tx('Repeat the full chain in order, then add one new {category}.', { category: itemLabel })
+          : memoryChain.phase === 'complete'
+            ? tx('Wonderful — you completed the full Memory Chain!')
+            : tx(memoryChain.failureReason === 'category' ? 'That answer was not a recognized item from this category.' : memoryChain.failureReason === 'duplicate' ? 'That item was already in the chain.' : 'That sequence was not quite right.');
+    const narration = [instruction, prompt, memoryChain?.phase === 'show' ? sequence.join(', ') : ''].filter(Boolean).join(' ');
+    return <div className="game-stage memory-chain-stage">
+      <div className="game-top"><button className="back-button" onClick={exitCurrentGame}>← {tx('Save & Exit')}</button>{activeSession ? <div className="session-progress"><span style={{ width: `${((activeSession.index + 1) / activeSession.games.length) * 100}%` }} /><b>{tx('{current} of {total}', { current: activeSession.index + 1, total: activeSession.games.length })}</b></div> : <div className="session-progress level-session-progress"><span style={{ width: `${level * 10}%` }} /><b>{tx('Level {level} of 10', { level })}</b></div>}<button className="mini-sos" onClick={() => setShowSos(true)}>! {tx('SOS')}</button></div>
+      <section className="play-card memory-chain-card">
+        <div className="play-meta game-play-meta"><GameVisual visual={selectedGame.visual} label={tx(selectedGame.name)} compact /><div><small>{tx('Memory')} · {tx(difficulty)} · {tx('Level {level} of 10', { level })}</small><h1>{tx('Memory Chain')}</h1></div></div>
+        <div className="game-question-panel memory-chain-question"><div><p className="instruction">{instruction}</p><h2 className="game-prompt">{prompt}</h2></div><GameSpeakerButton playing={gameSpeechPlaying} label={tx('Listen to question')} speakingLabel={tx('Speaking…')} onClick={() => speakGameText(narration)} /></div>
+        {!memoryChain && <div className="memory-chain-categories" aria-label={tx('Choose a category')}>
+          <button onClick={() => startMemoryChainCategory('vegetables')}><GameVisual visual={['🥕', '🥦', '🥬']} label={tx('Vegetables')} /><span><b>{tx('Vegetables')}</b><small>{tx('Build a chain using vegetable names.')}</small></span><i>→</i></button>
+          <button onClick={() => startMemoryChainCategory('fruits')}><GameVisual visual={['🍎', '🥭', '🍌']} label={tx('Fruits')} /><span><b>{tx('Fruits')}</b><small>{tx('Build a chain using fruit names.')}</small></span><i>→</i></button>
+        </div>}
+        {memoryChain && <>
+          <div className="memory-chain-status"><span>{categoryLabel}</span><b>{tx('{count} links remembered', { count: memoryChain.sequence.length })}</b></div>
+          {memoryChain.phase === 'recall' ? <div className="memory-chain-hidden" aria-label={tx('The chain is hidden')}><div>{memoryChain.sequence.map((entry, index) => <span key={`${entry.wordId}-${index}`}>?</span>)}<span className="new-link">+</span></div><p>{tx('The chain is hidden. Recall it in order and add one new item.')}</p></div> : <div className={`memory-chain-sequence chain-${memoryChain.phase}`} aria-label={tx('Memory chain sequence')}>
+            {memoryChain.sequence.map((entry, index) => <div className={`memory-link ${entry.source}`} key={`${entry.wordId}-${index}`}><small>{tx(entry.source === 'system' ? 'System' : 'You')}</small><b>{memoryChainWord(memoryChain.category, entry.wordId, language)}</b></div>)}
+          </div>}
+          {memoryChain.phase === 'show' && <button className="primary-action memory-chain-ready" onClick={prepareMemoryChainRecall}>✓ {tx('I remember — hide the chain')}</button>}
+          {memoryChain.phase === 'recall' && <div className="memory-chain-answer"><label><span>{tx('Type or speak the whole chain')}</span><input autoComplete="off" autoCapitalize="none" value={memoryChainInput} onChange={(event) => setMemoryChainInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submitMemoryChainAnswer(); }} placeholder={tx('Example: Apple, Mango')} /></label><button className={`memory-chain-mic ${voiceStatus === 'listening' ? 'is-listening' : ''}`} disabled={voiceStatus === 'processing'} onClick={() => voiceStatus === 'listening' || voiceStatus === 'requesting' ? cancelListening() : listen((value) => { setMemoryChainInput(value); submitMemoryChainAnswer(value); })} aria-label={voiceStatus === 'listening' ? tx('Stop listening') : tx('Speak my answer')} aria-pressed={voiceStatus === 'listening'}>{voiceStatus === 'listening' ? '■' : '🎤'}<span>{voiceStatus === 'listening' ? tx('Listening…') : tx('Speak')}</span></button><button className="primary-action" disabled={!memoryChainInput.trim()} onClick={() => submitMemoryChainAnswer()}>{tx('Check my chain')} →</button></div>}
+          {memoryChain.phase === 'failed' && <div className="memory-chain-result gentle" role="status" aria-live="polite"><span>♡</span><div><b>{tx('Good try — here is the chain to practise.')}</b><p>{sequence.join(' → ')}</p></div><div className="memory-chain-result-actions"><button className="primary-action" onClick={restartMemoryChain}>↻ {tx('Try this category again')}</button>{activeSession && <button className="secondary-action" onClick={() => continueAfterGame()}>{tx('Continue session')} →</button>}</div></div>}
+          {memoryChain.phase === 'complete' && <div className="memory-chain-result complete" role="status" aria-live="polite"><span>✦</span><div><b>{tx('Memory Chain complete!')}</b><p>{tx('You remembered the complete sequence and finished all 10 levels.')}</p></div><button className="primary-action" onClick={() => continueAfterGame()}>{activeSession ? tx('Continue session') : tx('Finish')} →</button></div>}
+        </>}
+        <button className="exit-game-button" onClick={exitCurrentGame}>{tx('Save & Exit')}</button>
+      </section>
+    </div>;
+  }
+
   function renderGame() {
     if (!selectedGame) return null;
+    if (selectedGame.id === MEMORY_CHAIN_GAME_ID) return renderMemoryChain();
     const difficulty = difficultyFor(selectedGame.category, data.results);
     const correct = selectedAnswer === selectedGame.answer;
     const prompt = tx(selectedGame.prompt, Object.fromEntries(Object.entries(selectedGame.promptValues ?? {}).map(([key, value]) => [key, selectedGame.familyType && key === 'relationship' ? tx(value) : value])));
+    const instruction = tx(selectedGame.instruction || CATEGORY_INSTRUCTIONS.en![selectedGame.category]);
     return <div className="game-stage">
       <div className="game-top"><button className="back-button" onClick={exitCurrentGame}>← {tx('Save & Exit')}</button>{activeSession ? <div className="session-progress"><span style={{ width: `${((activeSession.index + 1) / activeSession.games.length) * 100}%` }} /><b>{tx('{current} of {total}', { current: activeSession.index + 1, total: activeSession.games.length })}</b></div> : <div className="session-progress level-session-progress"><span style={{ width: `${selectedGame.level * 10}%` }} /><b>{tx('Level {level} of 10', { level: selectedGame.level })}</b></div>}<button className="mini-sos" onClick={() => setShowSos(true)}>! {tx('SOS')}</button></div>
-      <section className="play-card"><div className="play-meta"><span>{selectedGame.icon}</span><div><small>{tx(selectedGame.category)} · {tx(difficulty)} · {tx('Level {level} of 10', { level: selectedGame.level })}</small><h1>{tx(selectedGame.name)}</h1></div></div><p className="instruction">{tx(selectedGame.instruction || CATEGORY_INSTRUCTIONS.en![selectedGame.category])}</p>
+      <section className="play-card game-play-card"><div className="play-meta game-play-meta"><GameVisual visual={selectedGame.visual} label={tx(selectedGame.name)} compact /><div><small>{tx(selectedGame.category)} · {tx(difficulty)} · {tx('Level {level} of 10', { level: selectedGame.level })}</small><h1>{tx(selectedGame.name)}</h1></div></div>
         {familyQuiz && <FamilyPortrait member={familyQuiz} large />}
-        <h2 className="game-prompt">{prompt}</h2>
+        <div className="game-question-panel"><div><p className="instruction">{instruction}</p><h2 className="game-prompt">{prompt}</h2></div><GameSpeakerButton playing={gameSpeechPlaying} label={tx('Listen to question')} speakingLabel={tx('Speaking…')} onClick={() => speakGameText(`${instruction} ${prompt}`)} /></div>
         <div className="answer-grid">{selectedGame.options.map((option) => <button disabled={answerSaved} className={`${selectedAnswer === option ? 'selected' : ''} ${answerSaved && option === selectedGame.answer ? 'correct' : ''} ${answerSaved && selectedAnswer === option && option !== selectedGame.answer ? 'wrong' : ''}`} key={option} onClick={() => saveGameAnswer(option)}><span>{tx(option)}</span><i>{selectedAnswer === option ? '✓' : ''}</i></button>)}</div>
         {answerSaved && <div className={`answer-feedback ${correct ? 'correct' : 'gentle'}`} role="status" aria-live="polite"><span>{correct ? '✓' : '♡'}</span><div><b>{correct ? tx('Correct') : tx('Incorrect')}</b><p>{correct ? `${tx('Well done — level complete!')} ${selectedGame.level === 10 ? tx('You completed all 10 levels!') : tx('Your next level is ready.')}` : `${tx('Good try — practice helps.')} ${tx('The correct answer is {answer}.', { answer: tx(selectedGame.answer) })}`} {selectedGame.level < 10 && tx('Press Next when you are ready.')}</p></div><button onClick={continueAfterGame}>{activeSession ? tx('Continue session') : selectedGame.level === 10 ? tx('Finish') : tx('Next')} →</button></div>}
         <button className="exit-game-button" onClick={exitCurrentGame}>{tx('Save & Exit')}</button>
@@ -683,7 +1127,7 @@ export default function MindMitraApp() {
     return <><PageHeader kicker={tx('Personal memories')} title={tx('My Family')} text={tx('Add people who matter to you. Photos stay private and are used only to create your personal memory activities.')} backLabel={tx('Back')} onBack={() => go('home')} action={<button className="primary-action" onClick={() => whoFinished ? beginFamilyReplay('who') : startFamilyGame('who')}>♡ {tx('Play family game')}</button>} />
       <div className="family-layout"><section className="family-list card-panel"><div className="panel-title"><div><span className="section-kicker">{tx('Your circle')}</span><h2>{tx('{count} family members', { count: data.family.length })}</h2></div></div>{data.family.length ? <div className="family-grid">{data.family.map((member) => <article key={member.id}><FamilyPortrait member={member} /><div><h3>{member.name}</h3><p>{tx(member.relationship)}{member.nickname ? ` · “${member.nickname}”` : ''}</p></div><button aria-label={`${tx('Remove')} ${member.name}`} onClick={() => void removeFamilyMember(member)}>×</button></article>)}</div> : <EmptyState icon="♡" title={tx('Add your first family memory')} text={tx('A name, relationship, and optional photo are enough to begin.')} />}</section>
       <section className="card-panel form-panel"><span className="section-kicker">{tx('Add someone')}</span><h2>{tx('Create a family profile')}</h2><form onSubmit={addFamilyMember} className="stack-form"><label>{tx('Full name')}<input name="name" required placeholder={tx('e.g. Raj Das')} /></label><div className="two-fields"><label>{tx('Relationship')}<select name="relationship" required defaultValue=""><option value="" disabled>{tx('Choose')}</option>{relationshipOptions.map((item) => <option key={item} value={item}>{tx(item)}</option>)}</select></label><label>{tx('Nickname (optional)')}<input name="nickname" placeholder={tx('e.g. Raju')} /></label></div><label className="upload-field">{tx('Photo (optional)')}<input type="file" name="photo" accept="image/*" capture="user" /><small>{tx('Take a photo or choose one from your phone. Maximum 5 MB.')}</small></label><button className="primary-action wide" type="submit">{tx('Add to My Family')}</button></form></section></div>
-      <section className="memory-modes">{(Object.keys(FAMILY_GAME_META) as FamilyGameType[]).map((type) => { const meta = FAMILY_GAME_META[type]; const progress = familyProgressFor(type); const finished = progress.completedLevels.length === 10 && !progress.inProgress; return <article key={type}><span>{meta.icon}</span><h3>{tx(meta.name)}</h3><p>{tx(meta.description)}</p><div className="mini-level-track"><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></div><small>{tx('{count}/10 levels', { count: progress.completedLevels.length })} · {progress.completionCount === 1 ? tx('Completed {count} time', { count: progress.completionCount }) : tx('Completed {count} times', { count: progress.completionCount })}</small><button onClick={() => finished ? beginFamilyReplay(type) : startFamilyGame(type)}>{finished ? tx('Replay') : progress.inProgress ? tx('Continue') : tx('Play')} →</button></article>; })}</section>
+      <section className="memory-modes family-game-modes">{(Object.keys(FAMILY_GAME_META) as FamilyGameType[]).map((type) => { const meta = FAMILY_GAME_META[type]; const progress = familyProgressFor(type); const finished = progress.completedLevels.length === 10 && !progress.inProgress; return <article key={type}><GameVisual visual={meta.visual} label={tx(meta.name)} /><h3>{tx(meta.name)}</h3><p>{tx(meta.description)}</p><div className="mini-level-track"><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></div><small>{tx('{count}/10 levels', { count: progress.completedLevels.length })} · {progress.completionCount === 1 ? tx('Completed {count} time', { count: progress.completionCount }) : tx('Completed {count} times', { count: progress.completionCount })}</small><button onClick={() => finished ? beginFamilyReplay(type) : startFamilyGame(type)}>{finished ? tx('Replay') : progress.inProgress ? tx('Continue') : tx('Play')} →</button></article>; })}</section>
     </>;
   }
 
@@ -724,10 +1168,13 @@ export default function MindMitraApp() {
   function renderAssistant() {
     const examples = ['Start a game', 'Start a 15 minute session', 'Remind me to drink water', 'When is my medicine?', 'What should I do next?', 'Open my family'];
     const conversation = data.conversations.slice(-12);
-    return <><PageHeader kicker={tx('Your voice companion')} title={tx('Talk to Mitra')} text={tx('Speak or type naturally. Mitra remembers the recent conversation and responds in {language}.', { language: LANGUAGE_OPTIONS.find((item) => item.value === language)?.label ?? 'English' })} backLabel={tx('Back')} onBack={() => go('home')} />
-      <section className="assistant-card"><div className="mitra-avatar"><span>◉</span><i /></div><div className="conversation" aria-live="polite">{conversation.length ? conversation.map((message) => <div key={message.id} className={`chat-bubble ${message.role === 'user' ? 'user' : ''}`}><small>{message.role === 'user' ? tx('You') : tx('Mitra')}</small><p>{message.text}</p>{message.role === 'assistant' && <button onClick={() => speak(message.text)}>🔊 {tx('Hear this')}</button>}</div>) : <div className="chat-bubble"><small>{tx('Mitra')}</small><p>{mitraReply(language, 'greeting')}</p><button onClick={() => speak(mitraReply(language, 'greeting'))}>🔊 {tx('Hear this')}</button></div>}</div><div className="assistant-compose"><input aria-label={tx('Message Mitra')} value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') runAssistant(); }} placeholder={tx('Type a message or request…')} /><button className="voice-button" onClick={() => listen((value) => { setAssistantInput(value); runAssistant(value); })} aria-label={tx('Speak to Mitra')}>🎤</button><button className="send-button" onClick={() => runAssistant()}>{tx('Send')}</button></div><div className="command-chips">{examples.map((example) => <button key={example} onClick={() => runAssistant(example, tx(example))}>{tx(example)}</button>)}</div></section>
+    const greeting = mitraMessage(language, 'greeting', { name: data.profile?.name.split(' ')[0] ?? '' });
+    const voiceLabel = voiceStatus === 'requesting' ? tx('Requesting microphone permission…') : voiceStatus === 'listening' ? tx('Listening…') : voiceStatus === 'processing' ? tx('Understanding…') : voiceStatus === 'error' ? tx('Voice unavailable — type instead') : tx('Tap the microphone and speak naturally');
+    const contextLabel = assistantOrigin === 'game' && selectedGame ? tx('Helping with {game}', { game: tx(selectedGame.name) }) : tx('Ready to help across MindMitra');
+    return <div className="assistant-page"><PageHeader kicker={tx('Your voice companion')} title={tx('Talk to Mitra')} text={tx('Speak or type naturally. Mitra remembers the recent conversation and responds in {language}.', { language: LANGUAGE_OPTIONS.find((item) => item.value === language)?.label ?? 'English' })} backLabel={tx('Back')} onBack={() => go(assistantOrigin === 'assistant' ? 'home' : assistantOrigin)} />
+      <section className={`assistant-card voice-${voiceStatus}`}><div className="mitra-avatar"><span>m</span><i /></div><div className="assistant-context"><i />{contextLabel}</div><div className="voice-live" role="status" aria-live="polite"><span className="voice-pulse"><i /><i /><i /></span><b>{voiceLabel}</b>{recognizedSpeech && <p>“{recognizedSpeech}”</p>}</div><div className="conversation" aria-live="polite">{conversation.length ? conversation.map((message) => <div key={message.id} className={`chat-bubble ${message.role === 'user' ? 'user' : ''}`}><small>{message.role === 'user' ? tx('You') : tx('Mitra')}</small><p>{message.text}</p>{message.role === 'assistant' && <button onClick={() => speak(message.text)}>🔊 {tx('Hear this')}</button>}</div>) : <div className="chat-bubble"><small>{tx('Mitra')}</small><p>{greeting}</p><button onClick={() => speak(greeting)}>🔊 {tx('Hear this')}</button></div>}</div><div className="assistant-compose"><input aria-label={tx('Message Mitra')} value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') runAssistant(); }} placeholder={tx('Type a message or request…')} /><button className={`voice-button ${voiceStatus === 'listening' ? 'is-listening' : ''}`} disabled={voiceStatus === 'processing'} onClick={() => voiceStatus === 'listening' || voiceStatus === 'requesting' ? cancelListening() : listen((heard) => { setAssistantInput(heard); runAssistant(heard); })} aria-label={voiceStatus === 'listening' ? tx('Stop listening') : tx('Speak to Mitra')} aria-pressed={voiceStatus === 'listening'}>{voiceStatus === 'listening' ? '■' : '🎤'}</button><button className="send-button" onClick={() => runAssistant()}>{tx('Send')}</button></div><div className="command-chips">{examples.map((example) => <button key={example} onClick={() => runAssistant(example, tx(example))}>{tx(example)}</button>)}</div></section>
       <p className="privacy-note">{tx('Mitra keeps recent conversation context in your saved MindMitra data. Its built-in companion features do not send the conversation to an external AI service.')}</p>
-    </>;
+    </div>;
   }
 
   function renderSettings() {
@@ -739,7 +1186,7 @@ export default function MindMitraApp() {
         <Toggle label={tx('Reduced motion')} text={tx('Turn off movement and transitions.')} checked={data.profile?.reducedMotion ?? false} onChange={(checked) => updateProfile('reducedMotion', checked)} />
         <div className="setting-row"><div><b>{tx('Mitra language')}</b><p>{tx('Mitra’s text, games, and voice use your selected language.')}</p></div><select value={language} onChange={(event) => updateProfile('language', event.target.value as Language)}><LanguageOptionList /></select></div>
         <div className="setting-row"><div><b>{tx('Notifications')}</b><p>{tx('Allow medicine, hydration, appointment, and routine alerts.')}</p></div><button className="secondary-action" onClick={requestNotifications}>{tx('Enable')}</button></div></section>
-      <section className="card-panel profile-settings"><span className="section-kicker">{tx('Profile')}</span><h2>{data.profile?.name}</h2><p>{data.profile?.phone}<br />{data.profile?.email}</p><div className="emergency-box"><small>{tx('Emergency contact')}</small><b>{data.profile?.emergencyName}</b><span>{tx(data.profile?.emergencyRelationship ?? '')} · {data.profile?.emergencyPhone}</span></div><div className="code-box"><small>{tx('Caregiver connection code')}</small><b>{data.profile?.caregiverCode}</b><p>{tx('Share only with a caregiver you trust.')}</p></div><button className="secondary-action wide" onClick={() => setScreen('onboarding')}>{tx('Edit profile')}</button><button className="secondary-action wide profile-logout" onClick={() => { if (authUser) window.location.href = '/signout-with-chatgpt?return_to=%2F'; else setScreen('welcome'); }}>{tx('Log out')}</button><button className="danger-link" onClick={deleteAccount}>{tx('Delete my account and data')}</button></section></div>
+      <section className="card-panel profile-settings"><span className="section-kicker">{tx('Profile')}</span><h2>{data.profile?.name}</h2><p>{data.profile?.phone}<br />{data.profile?.email}</p><div className="emergency-box"><small>{tx('Emergency contact')}</small><b>{data.profile?.emergencyName}</b><span>{tx(data.profile?.emergencyRelationship ?? '')} · {data.profile?.emergencyPhone}</span></div><div className="code-box"><small>{tx('Caregiver connection code')}</small><b>{data.profile?.caregiverCode}</b><p>{tx('Share only with a caregiver you trust.')}</p></div><button className="secondary-action wide" onClick={() => setScreen('onboarding')}>{tx('Edit profile')}</button><button className="secondary-action wide profile-logout" onClick={() => { if (authUser) window.location.href = '/signout-with-chatgpt?return_to=%2F'; else setScreen('welcome'); }}>{tx('Log out')}</button><button className="danger-link" onClick={() => void deleteAccount()}>{tx('Delete my account and data')}</button></section></div>
       <details className="disclaimer"><summary>{tx('Important medical disclaimer')}</summary><p>{tx('MindMitra is designed for cognitive engagement, memory assistance, and daily activity support. It is not a medical diagnostic or treatment device. Game performance should not be interpreted as a diagnosis of dementia or any other medical condition. Please consult a qualified healthcare professional for medical concerns.')}</p></details>
     </>;
   }
@@ -755,8 +1202,8 @@ export default function MindMitraApp() {
     notify(tx(permission === 'granted' ? 'Notifications enabled.' : 'Notifications are disabled. You can still view reminders inside the app.'));
   }
 
-  async function deleteAccount() {
-    if (!window.confirm(tx('Delete your profile, family records, reminders, and game history from this device and synced account?'))) return;
+  async function deleteAccount(confirmed = false) {
+    if (!confirmed && !window.confirm(tx('Delete your profile, family records, reminders, and game history from this device and synced account?'))) return;
     if (authUser) {
       markPendingAccountDeletion(authUser.userId, true);
       if (online) {
@@ -791,8 +1238,10 @@ export default function MindMitraApp() {
 interface SpeechRecognitionLike {
   lang: string;
   interimResults: boolean;
+  onstart: () => void;
   onresult: (event: { results: { [index: number]: { [index: number]: { transcript: string } } } }) => void;
   onerror: () => void;
+  onend: () => void;
   start: () => void;
 }
 
@@ -844,7 +1293,15 @@ function NavButton({ icon, label, active, onClick }: { icon: string; label: stri
 
 function GameCard({ game, difficulty, progress, favorite, mine, tx, onPlay, onFavorite, onMine }: { game: GameDefinition; difficulty: string; progress: GameProgress; favorite: boolean; mine: boolean; tx: (source: string, values?: TranslationValues) => string; onPlay: () => void; onFavorite: () => void; onMine: () => void }) {
   const finished = progress.completedLevels.length === 10 && !progress.inProgress;
-  return <article className="game-card"><div className={`game-icon game-${game.category.toLowerCase()}`}>{game.icon}</div><div className="game-card-copy"><span>{tx(game.category)} · {tx(difficulty)}</span><h3>{tx(game.name)}</h3><p>{tx(game.instruction)}</p><div className="game-card-progress"><i><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></i><small>{tx('{count}/10 levels', { count: progress.completedLevels.length })} · {progress.completionCount === 1 ? tx('Completed {count} time', { count: progress.completionCount }) : tx('Completed {count} times', { count: progress.completionCount })}</small></div></div><div className="game-card-actions"><button className="play-game" onClick={onPlay}>{finished ? tx('Replay') : progress.inProgress || progress.currentLevel > 1 ? tx('Continue') : tx('Play')} →</button><button className={favorite ? 'marked' : ''} onClick={onFavorite} aria-label={favorite ? tx('Remove favorite') : tx('Add favorite')}>{favorite ? '★' : '☆'}</button><button className={mine ? 'marked' : ''} onClick={onMine} aria-label={mine ? tx('Remove from My Games') : tx('Add to My Games')}>{mine ? '✓' : '+'}</button></div></article>;
+  return <article className={`game-card game-library-card game-card-${game.category.toLowerCase()}`}><GameVisual visual={game.visual} label={tx(game.name)} /><div className="game-card-copy"><span>{tx(game.category)} · {tx(difficulty)}</span><h3>{tx(game.name)}</h3><p>{tx(game.instruction)}</p><div className="game-card-progress"><i><span style={{ width: `${progress.completedLevels.length * 10}%` }} /></i><small>{tx('{count}/10 levels', { count: progress.completedLevels.length })} · {progress.completionCount === 1 ? tx('Completed {count} time', { count: progress.completionCount }) : tx('Completed {count} times', { count: progress.completionCount })}</small></div></div><div className="game-card-actions"><button className="play-game" onClick={onPlay}>{finished ? tx('Replay') : progress.inProgress || progress.currentLevel > 1 ? tx('Continue') : tx('Play')} →</button><button className={favorite ? 'marked' : ''} onClick={onFavorite} aria-label={favorite ? tx('Remove favorite') : tx('Add favorite')}>{favorite ? '★' : '☆'}</button><button className={mine ? 'marked' : ''} onClick={onMine} aria-label={mine ? tx('Remove from My Games') : tx('Add to My Games')}>{mine ? '✓' : '+'}</button></div></article>;
+}
+
+function GameVisual({ visual, label, compact = false }: { visual: string[]; label: string; compact?: boolean }) {
+  return <div className={`game-visual ${compact ? 'compact' : ''}`} role="img" aria-label={label}>{visual.map((item, index) => <span aria-hidden="true" key={`${item}-${index}`}>{item}</span>)}</div>;
+}
+
+function GameSpeakerButton({ playing, label, speakingLabel, onClick }: { playing: boolean; label: string; speakingLabel: string; onClick: () => void }) {
+  return <button className={`game-speaker ${playing ? 'is-speaking' : ''}`} onClick={onClick} aria-label={playing ? speakingLabel : label} aria-pressed={playing}><span aria-hidden="true">{playing ? '◼' : '🔊'}</span><b>{playing ? speakingLabel : label}</b></button>;
 }
 
 function FamilyPortrait({ member, large = false }: { member: FamilyMember; large?: boolean }) {

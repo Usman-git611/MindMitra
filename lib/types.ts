@@ -91,6 +91,7 @@ export interface SavedGameRound {
     options: string[];
     answer: string;
     memberId?: string;
+    memoryChain?: MemoryChainState;
   };
 }
 
@@ -104,6 +105,18 @@ export interface ChatMessage {
 export interface AssistantContext {
   lastIntent?: string;
   lastReply?: string;
+  lastCapability?: string;
+  pendingCapability?: string;
+  missingParameters?: string[];
+  collectedParameters?: Record<string, string | number | boolean>;
+  awaitingConfirmation?: boolean;
+  lastActionResult?: 'success' | 'failed' | 'cancelled';
+  lastCategory?: Category;
+  currentScreen?: string;
+  currentUser?: string;
+  currentLanguage?: Language;
+  currentGame?: string;
+  currentSessionMinutes?: number;
   updatedAt: string;
 }
 
@@ -172,6 +185,7 @@ export interface GameDefinition {
   name: string;
   category: Category;
   icon: string;
+  visual: string[];
   instruction: string;
   levels: GameLevel[];
 }
@@ -190,4 +204,21 @@ export interface PlayableGame extends Omit<GameDefinition, 'levels' | 'instructi
   instruction: string;
   replay?: boolean;
   familyType?: FamilyGameType;
+}
+
+export type MemoryChainCategory = 'fruits' | 'vegetables';
+export type MemoryChainPhase = 'show' | 'recall' | 'failed' | 'complete';
+
+export interface MemoryChainEntry {
+  wordId: string;
+  source: 'system' | 'user';
+}
+
+export interface MemoryChainState {
+  category: MemoryChainCategory;
+  sequence: MemoryChainEntry[];
+  phase: MemoryChainPhase;
+  score: number;
+  lastInput?: string;
+  failureReason?: 'category' | 'sequence' | 'duplicate';
 }

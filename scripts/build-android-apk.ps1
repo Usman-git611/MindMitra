@@ -28,9 +28,12 @@ $unsignedApk = Join-Path $nativeBuild 'MindMitra-unsigned.apk'
 $alignedApk = Join-Path $nativeBuild 'MindMitra-aligned.apk'
 $classesJar = Join-Path $nativeBuild 'classes.jar'
 $classesDex = Join-Path $nativeBuild 'classes.dex'
+$compilerAndroidJar = Join-Path $nativeBuild 'android-36-compiler.jar'
 $assetStageRoot = Join-Path $nativeBuild 'apk-assets'
 $releaseDirectory = Join-Path $projectRoot 'releases'
-$releaseApk = Join-Path $releaseDirectory 'MindMitra-1.0-debug.apk'
+$versionCode = 4
+$versionName = '1.3'
+$releaseApk = Join-Path $releaseDirectory "MindMitra-$versionName-debug.apk"
 $keyStoreDirectory = Join-Path $projectRoot '.android-debug'
 $keyStore = Join-Path $keyStoreDirectory 'mindmitra-debug.keystore'
 
@@ -54,17 +57,18 @@ try {
   foreach ($artifact in @($compiledResources, $unsignedApk, $alignedApk, $classesJar, $classesDex, $releaseApk)) {
     if (Test-Path -LiteralPath $artifact) { Remove-Item -LiteralPath $artifact -Force }
   }
+  Copy-Item -LiteralPath $androidJar -Destination $compilerAndroidJar -Force
 
   & (Join-Path $buildTools 'aapt2.exe') compile --dir $resourceDirectory -o $compiledResources
   if ($LASTEXITCODE -ne 0) { throw 'Android resource compilation failed.' }
-  & (Join-Path $buildTools 'aapt2.exe') link -o $unsignedApk -I $androidJar --manifest (Join-Path $nativeRoot 'AndroidManifest.xml') --min-sdk-version 24 --target-sdk-version 36 --version-code 1 --version-name 1.0 $compiledResources
+  & (Join-Path $buildTools 'aapt2.exe') link -o $unsignedApk -I $androidJar --manifest (Join-Path $nativeRoot 'AndroidManifest.xml') --min-sdk-version 24 --target-sdk-version 36 --version-code $versionCode --version-name $versionName $compiledResources
   if ($LASTEXITCODE -ne 0) { throw 'Android package linking failed.' }
 
-  & (Join-Path $env:JAVA_HOME 'bin\javac.exe') -encoding UTF-8 -source 17 -target 17 -classpath $androidJar -d $classesDirectory (Join-Path $nativeRoot 'src\com\mindmitra\app\MainActivity.java')
+  & (Join-Path $env:JAVA_HOME 'bin\javac.exe') -encoding UTF-8 -source 17 -target 17 -classpath $compilerAndroidJar -d $classesDirectory (Join-Path $nativeRoot 'src\com\mindmitra\app\MainActivity.java')
   if ($LASTEXITCODE -ne 0) { throw 'Native Android activity compilation failed.' }
   & (Join-Path $env:JAVA_HOME 'bin\jar.exe') cf $classesJar -C $classesDirectory .
   if ($LASTEXITCODE -ne 0) { throw 'Native Android class packaging failed.' }
-  & (Join-Path $buildTools 'd8.bat') --lib $androidJar --min-api 24 --output $dexDirectory $classesJar
+  & (Join-Path $buildTools 'd8.bat') --lib $compilerAndroidJar --min-api 24 --output $dexDirectory $classesJar
   if ($LASTEXITCODE -ne 0) { throw 'Android DEX compilation failed.' }
   Copy-Item -LiteralPath (Join-Path $dexDirectory 'classes.dex') -Destination $classesDex -Force
 

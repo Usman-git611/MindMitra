@@ -1,4 +1,5 @@
 import type { AppData, FamilyGameProgress, GameProgress, Language, Profile, SavedGameRound } from './types';
+import { isMemoryChainState } from './memory-chain';
 
 export const STORAGE_KEY = 'mindmitra-v3';
 const PREVIOUS_STORAGE_KEY = 'mindmitra-v2';
@@ -71,7 +72,7 @@ function savedRound(value: unknown): SavedGameRound | undefined {
   const source = value as Partial<SavedGameRound>;
   const order = levels(source.order);
   const state = source.state && typeof source.state.prompt === 'string' && typeof source.state.answer === 'string' && Array.isArray(source.state.options)
-    ? { prompt: source.state.prompt, promptValues: source.state.promptValues, options: source.state.options.filter((item): item is string => typeof item === 'string'), answer: source.state.answer, memberId: source.state.memberId }
+    ? { prompt: source.state.prompt, promptValues: source.state.promptValues, options: source.state.options.filter((item): item is string => typeof item === 'string'), answer: source.state.answer, memberId: source.state.memberId, memoryChain: isMemoryChainState(source.state.memoryChain) ? source.state.memoryChain : undefined }
     : undefined;
   return {
     level: level(source.level),
@@ -123,6 +124,13 @@ export function normalizeData(value: Partial<AppData> | null | undefined): AppDa
       updatedAt: current.updatedAt ?? new Date().toISOString(),
     } satisfies FamilyGameProgress];
   }));
+  const context = value?.assistantContext && typeof value.assistantContext === 'object' ? value.assistantContext : emptyData.assistantContext;
+  const assistantContext = {
+    ...emptyData.assistantContext,
+    ...context,
+    missingParameters: Array.isArray(context.missingParameters) ? context.missingParameters.filter((item): item is string => typeof item === 'string').slice(0, 12) : undefined,
+    collectedParameters: context.collectedParameters && typeof context.collectedParameters === 'object' ? Object.fromEntries(Object.entries(context.collectedParameters).filter(([, item]) => ['string', 'number', 'boolean'].includes(typeof item)).slice(0, 20)) : undefined,
+  };
   return {
     ...emptyData,
     ...(value ?? {}),
@@ -139,7 +147,7 @@ export function normalizeData(value: Partial<AppData> | null | undefined): AppDa
     gameProgress,
     familyGameProgress,
     conversations: Array.isArray(value?.conversations) ? value.conversations : [],
-    assistantContext: value?.assistantContext && typeof value.assistantContext === 'object' ? value.assistantContext : emptyData.assistantContext,
+    assistantContext,
   } as AppData;
 }
 

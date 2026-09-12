@@ -46,7 +46,22 @@ const GAME_META: GameMeta[] = [
   [38, 'Festival Memory', 'Cultural', '🪔', 'Recall a festival and its North-Eastern connection.'],
   [39, 'Traditional Object Recognition', 'Cultural', '🧣', 'Recognize a traditional North-Eastern object or craft.'],
   [40, 'Local Sound Memory', 'Cultural', '🥁', 'Connect a familiar local instrument or setting with its sound.'],
+  [41, 'Memory Chain', 'Memory', '🔗', 'Remember the growing sequence, repeat it in order, and add one matching fruit or vegetable.'],
 ];
+
+export const GAME_VISUALS: Record<number, string[]> = {
+  1: ['🍎', '🔑', '☕'], 2: ['🃏', '✨', '🃏'], 3: ['1️⃣', '2️⃣', '3️⃣'], 4: ['🖼️', '↔️', '🔍'],
+  5: ['📖', '💭', '❓'], 6: ['🗓️', '🔑', '📍'], 7: ['🙂', '🤝', '🏷️'], 8: ['🖼️', '👁️', '💭'],
+  9: ['🍎', '🍎', '🍊'], 10: ['🔢', '🔎', '🎯'], 11: ['🌈', '👁️', '🎨'], 12: ['📜', '☝️', '✓'],
+  13: ['🎯', '👆', '⭐'], 14: ['🔵', '🟨', '🔵'], 15: ['▲', '●', '▲'], 16: ['2️⃣', '4️⃣', '➡️'],
+  17: ['🐜', '🐕', '🐘'], 18: ['🧩', '💡', '✓'], 19: ['☂️', '❓', '💡'], 20: ['🔑', '🔒', '✓'],
+  21: ['🏥', '🏫', '🏪'], 22: ['🍚', '🥭', '🍲'], 23: ['🪑', '🛏️', '🕰️'], 24: ['W', '🔤', 'D'],
+  25: ['☀️', '🌞', '💬'], 26: ['👤', '📝', '🏷️'], 27: ['🗣️', '…', '📜'], 28: ['✍️', '💬', '✓'],
+  29: ['🌅', '🪥', '☕'], 30: ['❓', '➡️', '✓'], 31: ['🕙', '📅', '🚶'], 32: ['1️⃣', '2️⃣', '3️⃣'],
+  33: ['😊', '😢', '😮'], 34: ['😌', '💭', '❤️'], 35: ['💛', '📷', '🌼'], 36: ['🧶', '↔️', '🏔️'],
+  37: ['⛰️', '🗺️', '📍'], 38: ['🪔', '🎊', '🗓️'], 39: ['🧣', '🧺', '🪡'], 40: ['🥁', '〰️', '👂'],
+  41: ['🥕', '🔗', '🍎'],
+};
 
 const LEVEL_BANKS: Record<number, LevelSeed[]> = {
   1: [
@@ -271,6 +286,13 @@ const LEVEL_BANKS: Record<number, LevelSeed[]> = {
     ['Which sound would most likely come from cymbals?', 'A metallic clash'], ['Which sound would most likely come from a gong?', 'A long resonant ring'], ['Which sound would most likely come from rain on a tin roof?', 'A steady patter'],
     ['Which sound would most likely come from a fast river?', 'Rushing water'], ['Which sound would most likely come from bamboo in the wind?', 'A gentle rustle'], ['Which sound would most likely come from a busy village market?', 'Many voices together'], ['Which sound would most likely come from evening crickets?', 'Rhythmic chirping'],
   ],
+  41: [
+    ['Memory Chain round 1: remember the growing sequence.', 'One link'], ['Memory Chain round 2: repeat the sequence and add a matching item.', 'Two links'],
+    ['Memory Chain round 3: keep every item in the correct order.', 'Three links'], ['Memory Chain round 4: recall the chain before adding a new item.', 'Four links'],
+    ['Memory Chain round 5: repeat all remembered items carefully.', 'Five links'], ['Memory Chain round 6: keep the fruit or vegetable chain growing.', 'Six links'],
+    ['Memory Chain round 7: recall the complete sequence in order.', 'Seven links'], ['Memory Chain round 8: listen, remember, and add one item.', 'Eight links'],
+    ['Memory Chain round 9: rebuild the full chain from memory.', 'Nine links'], ['Memory Chain round 10: complete the final memory chain.', 'Ten links'],
+  ],
 };
 
 function buildLevels(id: number): GameLevel[] {
@@ -285,7 +307,7 @@ function buildLevels(id: number): GameLevel[] {
 }
 
 export const GAME_LIBRARY: GameDefinition[] = GAME_META.map(([id, name, category, icon, instruction]) => ({
-  id, name, category, icon, instruction, levels: buildLevels(id),
+  id, name, category, icon, visual: GAME_VISUALS[id], instruction, levels: buildLevels(id),
 }));
 
 function shuffled<T>(values: T[]): T[] {

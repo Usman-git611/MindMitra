@@ -3,13 +3,16 @@ import { readFileSync } from 'node:fs';
 import { CATEGORIES, createBalancedSession, createLevelOrder, difficultyFor, GAME_LIBRARY, getPlayableGame } from '../lib/games';
 import { createFamilyGame } from '../lib/family-games';
 import { LANGUAGE_OPTIONS, mitraReply } from '../lib/mitra';
+import { advanceMemoryChain, createMemoryChain, memoryChainWord, MEMORY_CHAIN_GAME_ID, parseMemoryChainAnswer, validateMemoryChainAnswer } from '../lib/memory-chain';
 import { recordAnsweredLevel } from '../lib/progression';
 import { demoData, normalizeData } from '../lib/storage';
 import type { FamilyGameType, GameProgress, GameResult } from '../lib/types';
 
-assert.equal(GAME_LIBRARY.length, 40, 'The complete 40-game library must be present');
-assert.equal(new Set(GAME_LIBRARY.map((game) => game.id)).size, 40, 'Game IDs must be unique');
+assert.equal(GAME_LIBRARY.filter((game) => game.id <= 40).length, 40, 'All original 40 games must remain present');
+assert.equal(GAME_LIBRARY.length, 41, 'The original 40 games plus Memory Chain must be present');
+assert.equal(new Set(GAME_LIBRARY.map((game) => game.id)).size, 41, 'Game IDs must be unique');
 for (const game of GAME_LIBRARY) {
+  assert.ok(game.visual.length >= 3, `${game.name} must have a relevant multi-item visual`);
   assert.equal(game.levels.length, 10, `${game.name} must have exactly 10 levels`);
   assert.equal(new Set(game.levels.map((level) => level.prompt)).size, 10, `${game.name} levels must have distinct prompts`);
   for (const level of game.levels) {
@@ -17,7 +20,8 @@ for (const game of GAME_LIBRARY) {
     assert.equal(new Set(level.options).size, 4, `${game.name} level ${level.level} must offer four distinct choices`);
   }
 }
-assert.equal(GAME_LIBRARY.reduce((sum, game) => sum + game.levels.length, 0), 400, 'The library must contain 400 meaningful levels');
+assert.equal(GAME_LIBRARY.reduce((sum, game) => sum + game.levels.length, 0), 410, 'The library must preserve 400 original levels and add 10 Memory Chain progression levels');
+assert.equal(GAME_LIBRARY.find((game) => game.id === MEMORY_CHAIN_GAME_ID)?.name, 'Memory Chain', 'Memory Chain must use its required name and game registry ID');
 assert.deepEqual(createLevelOrder(false), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 'A first playthrough must remain sequential');
 for (let attempt = 0; attempt < 20; attempt += 1) {
   const replayOrder = createLevelOrder(true);
@@ -46,7 +50,25 @@ for (const type of ['who', 'match', 'remember'] as FamilyGameType[]) {
     assert.equal(new Set(familyGame.options).size, 4, `${type} level ${level} must have four distinct choices`);
   }
 }
-assert.ok(LANGUAGE_OPTIONS.length >= 10, 'Mitra must support at least 10 prioritized Indian languages');
+
+for (const category of ['fruits', 'vegetables'] as const) {
+  let chain = createMemoryChain(category, () => 0);
+  for (let turn = 0; turn < 3; turn += 1) {
+    const expected = chain.sequence.map((entry) => memoryChainWord(category, entry.wordId, 'en'));
+    const candidates = category === 'fruits' ? ['Mango', 'Banana', 'Orange', 'Papaya', 'Guava'] : ['Potato', 'Spinach', 'Tomato', 'Cabbage', 'Onion'];
+    const used = new Set(chain.sequence.map((entry) => entry.wordId));
+    const availableAnswer = candidates.find((candidate) => !used.has(parseMemoryChainAnswer(category, candidate)[0]))!;
+    const answer = [...expected, availableAnswer].join(', ');
+    const checked = validateMemoryChainAnswer(chain, answer);
+    assert.equal(checked.correct, true, `${category} must accept an ordered chain and one new valid item`);
+    chain = advanceMemoryChain(chain, checked.userWordId!, () => 0);
+  }
+  assert.equal(validateMemoryChainAnswer(chain, 'unrelated word').correct, false, `${category} must reject unrelated input`);
+}
+assert.deepEqual(parseMemoryChainAnswer('fruits', 'सेब, आम'), ['apple', 'mango'], 'Hindi Memory Chain speech text must map to canonical fruit IDs');
+assert.deepEqual(parseMemoryChainAnswer('fruits', 'আপেল ও আম'), ['apple', 'mango'], 'Bengali Memory Chain speech text must map to canonical fruit IDs');
+assert.deepEqual(parseMemoryChainAnswer('vegetables', 'গাজৰ আৰু আলু'), ['carrot', 'potato'], 'Assamese Memory Chain speech text must map to canonical vegetable IDs');
+assert.deepEqual(LANGUAGE_OPTIONS.map((item) => item.value), ['en', 'hi', 'bn', 'as'], 'Mitra must expose the four prioritized languages');
 for (const language of LANGUAGE_OPTIONS) assert.ok(mitraReply(language.value, 'greeting').length > 10, `${language.label} needs a useful Mitra greeting`);
 
 const legacy = normalizeData({
@@ -105,4 +127,4 @@ assert.ok(!appSource.includes('className="level-grid"'), 'The app must not rende
 assert.ok(!appSource.includes('className="family-levels"'), 'Family games must not render a manual level picker');
 assert.ok(!appSource.includes('Check my answer</button>'), 'An answer tap must give feedback immediately without a second submit step');
 
-console.log('Verified 40 games, 400 distinct levels, shuffled replay, direct answer flow, 30 family levels, backward-compatible progress, multilingual Mitra, balanced sessions, adaptive difficulty, SOS separation, and demo data.');
+console.log('Verified all original 40 games, 410 total levels, relevant visuals, Memory Chain typing/speech parsing, shuffled replay, direct answer flow, 30 family levels, backward-compatible progress, multilingual Mitra, balanced sessions, adaptive difficulty, SOS separation, and demo data.');

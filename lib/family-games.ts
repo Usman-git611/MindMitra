@@ -1,9 +1,9 @@
 import type { FamilyGameType, FamilyMember, PlayableGame } from './types';
 
-export const FAMILY_GAME_META: Record<FamilyGameType, { id: number; name: string; icon: string; description: string }> = {
-  who: { id: 101, name: 'Who Is This?', icon: '👤', description: 'Recognize a person and recall their relationship.' },
-  match: { id: 102, name: 'Match Name to Face', icon: '▦', description: 'Match a saved family photo with the right name.' },
-  remember: { id: 103, name: 'Remember the Family', icon: '↔', description: 'Recall names, nicknames, and relationships.' },
+export const FAMILY_GAME_META: Record<FamilyGameType, { id: number; name: string; icon: string; visual: string[]; description: string }> = {
+  who: { id: 101, name: 'Who Is This?', icon: '👤', visual: ['👵', '💭', '♡'], description: 'Recognize a person and recall their relationship.' },
+  match: { id: 102, name: 'Match Name to Face', icon: '▦', visual: ['🙂', '↔️', '🏷️'], description: 'Match a saved family photo with the right name.' },
+  remember: { id: 103, name: 'Remember the Family', icon: '↔', visual: ['👨‍👩‍👧', '💭', '❤️'], description: 'Recall names, nicknames, and relationships.' },
 };
 
 export const FAMILY_PROMPT_TEMPLATES: Record<FamilyGameType, string[]> = {
@@ -86,6 +86,7 @@ export function createFamilyGame(type: FamilyGameType, level: number, members: F
       name: meta.name,
       category: 'Recognition',
       icon: meta.icon,
+      visual: meta.visual,
       instruction: meta.description,
       level: safeLevel,
       prompt,
